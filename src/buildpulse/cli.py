@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from buildpulse import __version__, cache, config
-from buildpulse.commands import analyze_log, build, compare, run, triage
+from buildpulse.commands import analyze_log, build, compare, run, scan, triage
 from buildpulse.runner import latest_run
 
 
@@ -65,6 +65,19 @@ def make_parser() -> argparse.ArgumentParser:
                             "two most recent runs")
     p_cmp.add_argument("--log-dir", type=Path, help="where run logs are (default: .buildpulse/runs)")
     p_cmp.set_defaults(func=_run_compare)
+
+    p_scan = sub.add_parser(
+        "scan", help="supply-chain scan: SBOM (Syft), SCA (Trivy), SAST (Semgrep)")
+    p_scan.add_argument("-C", "--project-dir", type=Path,
+                        help="project to scan (default: [project] dir in buildpulse.toml, "
+                             "else the current directory)")
+    p_scan.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "none"],
+                        default="high",
+                        help="fail when SCA finds vulnerabilities at this severity or above "
+                             "(default: high)")
+    p_scan.add_argument("--log-dir", type=Path, help="where run logs go (default: .buildpulse/runs)")
+    p_scan.add_argument("--cache-dir", type=Path, help="cache root (Conan home for the lock stage)")
+    p_scan.set_defaults(func=_run_scan)
 
     p_tri = sub.add_parser(
         "triage", help="summarize a failed run for root-cause analysis (human or AI agent)")
@@ -154,6 +167,26 @@ def _run_compare(args: argparse.Namespace) -> int:
         print(f"buildpulse: {exc}", file=sys.stderr)
         return 2
     return 0
+
+
+def _run_scan(args: argparse.Namespace) -> int:
+    cfg = config.load(Path.cwd())
+    project_dir = (args.project_dir or cfg.project_dir).resolve()
+    caches = cache.resolve(args.cache_dir or cfg.cache_dir, None, compiler_cache="none")
+    report = scan.run(project_dir, (args.log_dir or cfg.log_dir).resolve(),
+                      fail_on=args.fail_on, env={"CONAN_HOME": str(caches.conan_home)})
+    print(report.summary())
+    meta = report.meta
+    print(f"sbom:   {meta['sbom']['components']} components "
+          f"({meta['source']['name']} {meta['source']['version']})")
+    def findings(counts: dict | None) -> str:
+        if counts is None:
+            return "no report"
+        return ", ".join(f"{n} {level}" for level, n in counts.items()) or "0 findings"
+
+    print(f"sca:    {findings(meta['sca']['findings'])}  (gate: {meta['fail_on']} and above)")
+    print(f"sast:   {findings(meta['sast']['findings'])}")
+    return report.exit_code
 
 
 def _run_triage(args: argparse.Namespace) -> int:

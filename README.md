@@ -5,7 +5,7 @@ log** — every stage, stdout and stderr, exit codes and timings — so the log 
 
 ```
 BuildPulse/
-├── src/buildpulse/        Python CLI (build, run, compare, triage, analyze-log)
+├── src/buildpulse/        Python CLI (build, run, compare, triage, scan, analyze-log)
 ├── .claude/skills/        ci-triage agent skill for Claude Code
 ├── tests/                 pytest + real-world build log fixtures
 ├── native/                internal sample C++ project, used only to test BuildPulse itself
@@ -19,7 +19,7 @@ BuildPulse/
 
 Requires Python ≥ 3.11, CMake ≥ 3.24, a C/C++ compiler (Ninja for the `native/` presets).
 Optional: Conan 2 (`pip install -e ".[conan]"`, included in `.[dev]`) and ccache or sccache for caching,
-Docker for cross-compilation.
+Docker for cross-compilation, Syft + Trivy + Semgrep for `buildpulse scan`.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -249,6 +249,54 @@ never re-triggers on `fix/ci-*` branches, and it can open PRs and issues but nev
 Two failures in one PR, two different root causes, each fixed at the right place: that distinction
 is what the skill is for. Both lessons were added to `failure-patterns.md`.
 
+## Supply chain: SBOM, SCA and SAST (EU Cyber Resilience Act)
+
+`buildpulse scan` runs the supply-chain checks as recorded stages, like a build: every stage's
+log, a `report.json` with component and finding counts, and the outputs in the run directory.
+
+```bash
+buildpulse scan                      # the configured project (native/)
+buildpulse scan -C . --fail-on high  # the whole repo: C++ project + Python tooling + CI config
+```
+
+| Stage | Tool | Output | Gate |
+|-------|------|--------|------|
+| `lock` | `conan lock create` (only if the project uses Conan and has no `conan.lock`) | `conan.lock`, committed | — |
+| `sbom` | Syft | `sbom.cdx.json` (CycloneDX) + `sbom.spdx.json` (SPDX), source name + `git describe` version | — |
+| `sca` | Trivy on the SBOM | table in the log | fails at `--fail-on` severity and above (default `high`) |
+| `sca-sarif` | Trivy on the SBOM | `sca.sarif`, all severities | — |
+| `sast` | Semgrep (`p/c`, `p/python`) | `sast.sarif` | fails on ERROR-severity findings |
+
+All stages run even if one fails, so a single report lists every finding. `buildpulse build` uses
+the committed `conan.lock`, so the dependencies that are built are exactly the ones in the SBOM.
+
+**CI: `security.yml`** runs on every push/PR **and weekly**, because new CVEs are published against
+code that has not changed. It runs `buildpulse scan -C .`, `trivy config` on the Dockerfile and
+workflows (report only), uploads `sca.sarif` / `sast.sarif` to GitHub code scanning, keeps the SBOMs
+as artifacts, and runs **CodeQL** for C++ (observing a real `buildpulse build`) and Python.
+
+### Why it matters here (EU CRA)
+
+A networked sensor like a Gocator is a "product with digital elements" under the CRA (Regulation
+(EU) 2024/2847). Reporting of actively exploited vulnerabilities applies from 11 September 2026; the
+main obligations from 11 December 2027. For the build pipeline that means: an SBOM in a
+machine-readable format (CycloneDX or SPDX) in the technical documentation for every release, known
+vulnerabilities tracked against it for the whole support period, and fast answers to "are we
+affected?" when a CVE lands (early warning within 24 h for exploited ones). The SBOM does not have
+to be published, but it has to exist and be accurate per release.
+
+### What this scan does not cover yet (and how to close it)
+
+| Gap | Why it matters | Next step |
+|-----|----------------|-----------|
+| **Semgrep's C rules skip `.cpp` files** (it reported "0 findings" on C++ it never looked at) | A green SAST check that scanned nothing is worse than none | CodeQL `c-cpp` in `security.yml` (done); add `clang-tidy` (`bugprone-*`, `cert-*`) as a fast PR check |
+| **Sysroot libraries are invisible**: glibc and libstdc++ from the bookworm sysroot are unpacked with `dpkg-deb -x`, so no package database records them | They are linked into the product, so they belong in its SBOM | Record the sysroot package list (name, version, purl) when building the image, merge it into the product SBOM, or scan the final firmware image / rootfs instead of the source tree |
+| **Test-only dependencies are listed** (GTest is a `test_requires`) | Noise in the product SBOM; CycloneDX can mark scope | Generate the product SBOM from the Conan graph with scopes (`required` vs `excluded`), or drop test requirements |
+| **Vendored / copied C++ code has no manifest** | Syft finds packages by manifests, not by copied source | Keep third-party code in Conan, or declare vendored code in a manifest |
+| **CI actions are referenced by tag** (`actions/checkout@v7`; 27 of them in the SBOM) | Tags are mutable; a compromised action runs with the repo's token | Pin actions to commit SHAs, update them with Dependabot/Renovate |
+| **No VEX** | A CVE in a function we never call is still reported as affected | Publish VEX statements (CycloneDX VEX / OpenVEX) next to the SBOM |
+| **Artifacts are not signed** | The SBOM and binaries should be verifiably ours | Sign with Sigstore/cosign or an HSM-backed key; attach SLSA provenance to releases |
+
 ## Where the logs go
 
 Every `build` or `run` creates a new run directory:
@@ -305,6 +353,56 @@ The `buildpulse.toml` in this repo points at `native/`, an **internal sample pro
 test BuildPulse itself**. For real work, always pass `-C <your project>` (or use `run`). Without a
 `buildpulse.toml` and without `-C`, the current directory is treated as the project.
 
+## Next steps (designed, not built yet)
+
+### Device test rigs: tests on real Gocators, not just QEMU
+
+QEMU proves the aarch64 binary runs; it does not prove the product works on the sensor.
+The plan for a rig behind CI:
+
+- **Runner:** a self-hosted runner (or Bamboo remote agent) on a small Linux box in the lab, labelled
+  by the hardware it can reach (`[self-hosted, linux, rig-gocator-2500]`). Jobs that need hardware
+  ask for the label; everything else stays on cloud runners. A Raspberry Pi (bookworm, same glibc as
+  our sysroot) is a cheap stand-in for developing the flow.
+- **Flow:** `cross-arm64` publishes the build artifact → the rig job downloads it, **checks out a
+  device** (lock), flashes or deploys, waits for health (boot, version endpoint), runs the on-device
+  GTest binary and pytest/Jest end-to-end suites over the network, collects device logs, and
+  **always** releases the device and restores a known-good image.
+- **Results** go through buildpulse like any run: stage logs, `report.json`, and a triage bundle on
+  failure, with the device id and firmware version in the environment.
+- **Telling device faults from code faults:** health check before the test (fail as `infrastructure`,
+  not `test`), a known-good build as control, retries only for infrastructure failures, and
+  quarantining a device that fails its health check twice. Flaky tests are tracked, not retried away.
+- **Capacity:** a pool of devices per product family, a queue with timeouts, and a dashboard of rig
+  utilisation and failure causes.
+
+### Bamboo → Bitbucket Pipelines (and how this repo maps to both)
+
+| GitHub Actions (here) | Bamboo | Bitbucket Pipelines |
+|---|---|---|
+| Workflow file in the repo | Plan (UI or Bamboo Specs in Java/YAML) | `bitbucket-pipelines.yml` in the repo |
+| Job | Stage → Job (jobs in a stage run in parallel) | Step (`parallel:` groups) |
+| Step | Task | Script line / Pipe |
+| Hosted / self-hosted runner | Local / remote / elastic agent with capabilities | Atlassian cloud runner / self-hosted runner with labels |
+| `actions/cache` | Agent-local workspace or external cache | `caches:` (built-in and custom) |
+| `upload-artifact` | Shared artifacts between stages | `artifacts:` |
+| Deployment environments | Deployment projects + environments | `deployment:` environments |
+| `workflow_dispatch` / matrix | Manual stage / plan variables, plan branches | Custom pipelines / `parallel` steps |
+
+Migration approach: keep the logic out of CI YAML, so it moves with no rewrite. That is why every job
+here is a thin wrapper around `buildpulse build|scan|triage`. Then: Bamboo Specs in the repo first (plans
+as code), move one product line's PR builds to Pipelines with self-hosted runners for the Docker and
+MSVC builds, run both in parallel and compare results and timings, switch over, and keep the
+hardware-rig plans on Bamboo agents until the rig runners are ported.
+
+### Also next
+- **Remote caches at team scale:** Conan remote (Artifactory) for dependency binaries, sccache/ccache
+  remote storage for compiler output, so every runner starts warm.
+- **Versioning and artifact publishing:** version from git tags, build metadata in `report.json`,
+  publish binaries, SBOM and checksums together per release.
+- **Fewer `docker run` start-ups:** one long-lived build container per run instead of one per stage.
+- **Jest** for the TypeScript front end, reported through the same run format.
+
 ## Roadmap
 
 | # | Feature | Status |
@@ -313,7 +411,7 @@ test BuildPulse itself**. For real work, always pass `-C <your project>` (or use
 | 2 | ARM64 cross-compilation in Docker (GCC + sysroot + CMake toolchain file) | ✅ |
 | 3 | Claude skill: CI log → root cause → fix PR (`buildpulse triage`, `ci-triage` skill, `ci-autofix`) | ✅ |
 | 4 | Build caching: Conan binary cache, ccache, Docker/CI caches, cold-vs-warm compare | ✅ |
-| 5 | SBOM (Syft) + Trivy / Semgrep in the pipeline | ⬜ |
+| 5 | Supply chain: SBOM (Syft), SCA (Trivy), SAST (Semgrep + CodeQL), weekly re-scan | ✅ |
 | 6 | Windows runner with MSVC (+ sccache, buildpulse tested on Windows) | ✅ |
-| 7 | Raspberry Pi device test rig running GTest | ⬜ |
-| 8 | Bamboo ↔ GitHub Actions concept mapping | ⬜ |
+| 7 | Device test rigs | 📝 designed, see Next steps |
+| 8 | Bamboo ↔ Bitbucket Pipelines ↔ GitHub Actions mapping and migration | 📝 designed, see Next steps |

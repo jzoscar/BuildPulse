@@ -1,0 +1,96 @@
+name: security
+
+# Supply chain and static analysis on every change, and weekly: new CVEs are
+# published against code that has not changed, so an unchanged repo can go red.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write  # upload SARIF to GitHub code scanning
+
+jobs:
+  # SBOM (Syft) + SCA (Trivy) + SAST (Semgrep) through `buildpulse scan`, so the
+  # results are recorded like any build: logs, report.json, artifacts.
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # git describe for the SBOM's source version
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[conan]" semgrep
+      - uses: anchore/sbom-action/download-syft@v0.24.3
+        id: syft
+      - run: echo "$(dirname '${{ steps.syft.outputs.cmd }}')" >> "$GITHUB_PATH"
+      - uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          cache: true
+
+      - name: Scan the repository (C++ project + build tooling)
+        run: buildpulse scan -C . --fail-on high --log-dir scan-logs
+      - name: Build-environment misconfigurations (Dockerfile, workflows), report only
+        if: always()
+        run: trivy config --exit-code 0 docker .github/workflows
+
+      - name: Find the scan outputs
+        id: out
+        if: always()
+        run: echo "dir=scan-logs/$(cat scan-logs/latest.txt)" >> "$GITHUB_OUTPUT"
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('scan-logs/*/sca.sarif') != ''
+        with:
+          sarif_file: ${{ steps.out.outputs.dir }}/sca.sarif
+          category: sca-trivy
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('scan-logs/*/sast.sarif') != ''
+        with:
+          sarif_file: ${{ steps.out.outputs.dir }}/sast.sarif
+          category: sast-semgrep
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sbom-and-scan
+          path: |
+            scan-logs/
+            !scan-logs/latest
+
+  # CodeQL: semantic SAST. For C++ it observes a real build (Semgrep's C rules
+  # do not cover .cpp files).
+  codeql:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: c-cpp
+            build-mode: manual
+          - language: python
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-and-quality
+      - name: Build the C++ project for CodeQL
+        if: matrix.language == 'c-cpp'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          pip install -e ".[conan]"
+          buildpulse build --preset host-release --no-test --compiler-cache none --log-dir build-logs
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: codeql-${{ matrix.language }}

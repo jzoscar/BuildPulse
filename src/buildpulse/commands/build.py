@@ -99,6 +99,10 @@ def plan(opts: BuildOptions) -> list[tuple[str, list[str]]]:
             f"--build={conan_build}",
             "-s", f"build_type={opts.effective_build_type}",
         ]))
+        lockfile = opts.project_dir / "conan.lock"
+        if lockfile.is_file():
+            # Pinned dependency revisions: reproducible builds, and the SBOM matches the build.
+            stages[-1][1].extend(["--lockfile", str(lockfile)])
         generator = preset_generator(opts.project_dir, opts.preset) if opts.preset else None
         if generator:
             # conan_toolchain.cmake must match the generator, e.g. no VS platform/toolset
