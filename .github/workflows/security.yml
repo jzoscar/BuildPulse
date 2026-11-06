@@ -37,9 +37,9 @@ jobs:
 
       - name: Scan the repository (C++ project + build tooling)
         run: buildpulse scan -C . --fail-on high --log-dir scan-logs
-      - name: Build-environment misconfigurations (Dockerfile, workflows), report only
+      - name: Build-image misconfigurations (Dockerfile), report only
         if: always()
-        run: trivy config --exit-code 0 docker .github/workflows
+        run: trivy config --exit-code 0 docker
 
       - name: Find the scan outputs
         id: out
