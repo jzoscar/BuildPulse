@@ -295,6 +295,7 @@ to be published, but it has to exist and be accurate per release.
 | **Vendored / copied C++ code has no manifest** | Syft finds packages by manifests, not by copied source | Keep third-party code in Conan, or declare vendored code in a manifest |
 | **CI actions are referenced by tag** (`actions/checkout@v7`; 27 of them in the SBOM) | Tags are mutable; a compromised action runs with the repo's token | Pin actions to commit SHAs, update them with Dependabot/Renovate |
 | **No VEX** | A CVE in a function we never call is still reported as affected | Publish VEX statements (CycloneDX VEX / OpenVEX) next to the SBOM |
+| **`trivy config` flags the build image** (report-only in CI): DS-0002 HIGH no `USER`, DS-0013 MEDIUM `cd` in `RUN`, DS-0026 LOW no `HEALTHCHECK` | Each finding needs a decision, not silence | DS-0002 is mitigated at run time (`buildpulse --docker` runs as the host uid via `--user`); DS-0026 does not apply to a build image; DS-0013 is style. Record those decisions in a `.trivyignore` with reasons, then make the step gating |
 | **Artifacts are not signed** | The SBOM and binaries should be verifiably ours | Sign with Sigstore/cosign or an HSM-backed key; attach SLSA provenance to releases |
 
 ## Where the logs go
