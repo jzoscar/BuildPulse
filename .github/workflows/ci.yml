@@ -27,16 +27,15 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y ninja-build
       - run: pip install -e .
-      - run: buildpulse build --preset host-release 2>&1 | tee build.log
-        shell: bash
+      - run: buildpulse build --preset host-release --log-dir build-logs
       - name: Triage build log on failure
         if: failure()
-        run: buildpulse analyze-log build.log
+        run: buildpulse analyze-log build-logs/latest/full.log
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: linux-x64-build
           path: |
-            build.log
-            native/build/host-release/buildpulse-report.json
+            build-logs/
+            !build-logs/latest
             native/build/host-release/pulse

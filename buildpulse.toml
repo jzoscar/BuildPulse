@@ -1,0 +1,10 @@
+# Defaults for `buildpulse` when run anywhere inside this repo.
+# Command-line flags override these; `--project-dir` ignores [project].preset.
+
+[project]
+dir = "native"          # CMake project built by `buildpulse build`
+preset = "host-debug"   # omit to build without CMakePresets.json
+# build_type = "Debug"  # CMAKE_BUILD_TYPE when no preset is used
+
+[logs]
+dir = ".buildpulse/runs"

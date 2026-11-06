@@ -1,72 +1,75 @@
-"""Drive a CMake preset through configure -> build -> test, timing each stage."""
+"""Build any CMake project through configure -> build -> test, recording every stage.
+
+Two modes:
+  preset  `cmake --preset X` etc. — used when a preset is given (flag or buildpulse.toml)
+  plain   `cmake -S <project> -B <build-dir>` — for projects without CMakePresets.json
+"""
 
 from __future__ import annotations
 
-import json
-import shutil
-import subprocess
-import time
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from buildpulse.runner import Recorder, RunReport
 
-@dataclass
-class Stage:
-    name: str
-    command: list[str]
-    returncode: int
-    seconds: float
+DEFAULT_BUILD_DIR = "build/buildpulse"
 
 
-@dataclass
-class BuildReport:
-    preset: str
-    build_dir: str
-    stages: list[Stage] = field(default_factory=list)
+def plan(
+    project_dir: Path,
+    preset: str | None,
+    build_type: str = "Debug",
+    build_dir: Path | None = None,
+    run_tests: bool = True,
+    clean: bool = False,
+) -> list[tuple[str, list[str]]]:
+    """Return the (stage name, command) pairs to run from `project_dir`, in order."""
+    if preset:
+        configure = ["cmake", "--preset", preset]
+        build = ["cmake", "--build", "--preset", preset]
+        test = ["ctest", "--preset", preset]
+    else:
+        build_dir = build_dir or project_dir / DEFAULT_BUILD_DIR
+        configure = ["cmake", "-S", str(project_dir), "-B", str(build_dir),
+                     f"-DCMAKE_BUILD_TYPE={build_type}"]
+        build = ["cmake", "--build", str(build_dir), "--parallel"]
+        test = ["ctest", "--test-dir", str(build_dir), "--output-on-failure"]
+    if clean:
+        configure.append("--fresh")
+        build.append("--clean-first")
 
-    @property
-    def ok(self) -> bool:
-        return all(s.returncode == 0 for s in self.stages)
-
-    def summary(self) -> str:
-        lines = [f"preset: {self.preset}"]
-        for s in self.stages:
-            status = "ok" if s.returncode == 0 else f"FAILED ({s.returncode})"
-            lines.append(f"  {s.name:<10} {s.seconds:7.2f}s  {status}")
-        total = sum(s.seconds for s in self.stages)
-        lines.append(f"  {'total':<10} {total:7.2f}s  {'ok' if self.ok else 'FAILED'}")
-        lines.append(f"report: {self.build_dir}/buildpulse-report.json")
-        return "\n".join(lines)
-
-    def to_json(self) -> str:
-        return json.dumps({**asdict(self), "ok": self.ok}, indent=2)
-
-
-def plan(preset: str, run_tests: bool) -> list[tuple[str, list[str]]]:
-    """Return the (stage name, command) pairs for a preset, in order."""
-    stages = [
-        ("configure", ["cmake", "--preset", preset]),
-        ("build", ["cmake", "--build", "--preset", preset]),
-    ]
+    stages = [("configure", configure), ("build", build)]
     if run_tests:
-        stages.append(("test", ["ctest", "--preset", preset]))
+        stages.append(("test", test))
     return stages
 
 
-def run(native_dir: Path, preset: str, run_tests: bool = True, clean: bool = False) -> BuildReport:
-    build_dir = native_dir / "build" / preset
-    if clean and build_dir.exists():
-        shutil.rmtree(build_dir)
+def validate(project_dir: Path, preset: str | None) -> str | None:
+    """Return an error message if `project_dir` cannot be built, else None."""
+    if not (project_dir / "CMakeLists.txt").is_file():
+        return f"{project_dir} has no CMakeLists.txt"
+    if preset and not (project_dir / "CMakePresets.json").is_file():
+        return f"--preset {preset} given but {project_dir} has no CMakePresets.json"
+    return None
 
-    report = BuildReport(preset=preset, build_dir=str(build_dir))
-    for name, cmd in plan(preset, run_tests):
-        print(f"==> {name}: {' '.join(cmd)}", flush=True)
-        start = time.monotonic()
-        rc = subprocess.run(cmd, check=False, cwd=native_dir).returncode
-        report.stages.append(Stage(name, cmd, rc, round(time.monotonic() - start, 3)))
-        if rc != 0:
+
+def run(
+    project_dir: Path,
+    log_dir: Path,
+    preset: str | None = None,
+    build_type: str = "Debug",
+    build_dir: Path | None = None,
+    run_tests: bool = True,
+    clean: bool = False,
+    echo: bool = True,
+) -> RunReport:
+    label = preset or f"plain-{build_type.lower()}"
+    recorder = Recorder(log_dir, kind="build", label=label, project_dir=project_dir, echo=echo)
+    for name, cmd in plan(project_dir, preset, build_type, build_dir, run_tests, clean):
+        if recorder.stage(name, cmd, cwd=project_dir).returncode != 0:
             break
-
-    build_dir.mkdir(parents=True, exist_ok=True)
-    (build_dir / "buildpulse-report.json").write_text(report.to_json())
-    return report
+    return recorder.finish(
+        mode="preset" if preset else "plain",
+        preset=preset,
+        build_type=None if preset else build_type,
+        build_dir=None if preset else str(build_dir or project_dir / DEFAULT_BUILD_DIR),
+    )
