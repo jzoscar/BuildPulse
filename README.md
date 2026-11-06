@@ -129,11 +129,15 @@ Every run records its cache settings and the ccache hit rate in `report.json` (`
 | macOS host, Debug — total | 9.34 s | 2.19 s | 4.3× |
 | aarch64 cross in Docker — `deps` (GTest) | 23.48 s | 2.74 s | 8.6× |
 | aarch64 cross in Docker — total | 34.22 s | 16.68 s | 2.1× |
+| aarch64 cross, GitHub runner (`cache-benchmark` job) — `deps` | 14.64 s | 0.48 s | 30.5× |
+| aarch64 cross, GitHub runner (`cache-benchmark` job) — total | 16.59 s | 2.01 s | 8.3× |
 
 ccache hit 3/3 compilations on the warm runs. The sample project is tiny, so the dependency layer
 dominates; on a real code base the ccache share grows with the number of translation units.
 In Docker on a Mac every stage pays ~0.5–3 s of `docker run` start-up under Rosetta, which is why
 small stages such as `ccache-zero` look slow there; on a Linux CI runner that overhead is far smaller.
+With the Docker layer, Conan and ccache caches restored, the whole `linux-arm64` CI job dropped from
+1 min 34 s to 50 s.
 A manual `cache-benchmark` job in the `cross-arm64` workflow (Actions → cross-arm64 → Run workflow)
 repeats the cold/warm comparison on a GitHub runner and writes the table to the job summary.
 
