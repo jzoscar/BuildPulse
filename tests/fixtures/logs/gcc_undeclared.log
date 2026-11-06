@@ -1,0 +1,9 @@
+[1/4] Building CXX object CMakeFiles/pulse_core.dir/src/checksum.cpp.o
+FAILED: CMakeFiles/pulse_core.dir/src/checksum.cpp.o
+/usr/bin/aarch64-linux-gnu-g++ -I../../include -O2 -std=c++17 -c ../../src/checksum.cpp
+../../src/checksum.cpp: In function 'uint32_t pulse::crc32(std::string_view)':
+../../src/checksum.cpp:14:12: error: 'crc_table' was not declared in this scope
+   14 |     return crc_table[0];
+      |            ^~~~~~~~~
+../../src/checksum.cpp:9:9: warning: unused variable 'seed' [-Wunused-variable]
+ninja: build stopped: subcommand failed.

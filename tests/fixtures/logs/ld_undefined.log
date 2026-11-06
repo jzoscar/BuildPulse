@@ -1,0 +1,5 @@
+[4/4] Linking CXX executable pulse_tests
+FAILED: pulse_tests
+/usr/bin/ld: CMakeFiles/pulse_tests.dir/tests/test_checksum.cpp.o: in function `main':
+test_checksum.cpp:(.text+0x24): undefined reference to `pulse::crc32(std::basic_string_view<char, std::char_traits<char> >)'
+collect2: error: ld returned 1 exit status

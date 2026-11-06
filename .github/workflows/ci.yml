@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests
+      - run: pytest -q
+
+  native-linux-x64:
+    runs-on: ubuntu-latest
+    needs: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: pip install -e .
+      - run: buildpulse build --preset host-release 2>&1 | tee build.log
+        shell: bash
+      - name: Triage build log on failure
+        if: failure()
+        run: buildpulse analyze-log build.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-x64-build
+          path: |
+            build.log
+            native/build/host-release/buildpulse-report.json
+            native/build/host-release/pulse

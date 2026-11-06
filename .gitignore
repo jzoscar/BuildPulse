@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+native/build/
+build.log
+.DS_Store
