@@ -8,13 +8,15 @@ BuildPulse/
 ├── src/buildpulse/        Python CLI (build, run, analyze-log)
 ├── tests/                 pytest + real-world build log fixtures
 ├── native/                internal sample C++ project, used only to test BuildPulse itself
+├── docker/                cross-compilation images
+├── toolchains/            CMake toolchain files
 ├── buildpulse.toml        defaults for this repo (points at native/)
 └── .github/workflows/     CI
 ```
 
 ## Install
 
-Requires Python ≥ 3.11, CMake ≥ 3.24, and a C/C++ compiler (Ninja for the `native/` presets).
+Requires Python ≥ 3.11, CMake ≥ 3.24, a C/C++ compiler (Ninja for the `native/` presets), and Docker for cross-compilation.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -51,6 +53,45 @@ Everything after `--` is run as-is:
 buildpulse run -- ./scripts/build.sh --target arm64
 buildpulse run --cwd ~/code/my-project --name nightly -- make -j8
 ```
+
+## Cross-compile for ARM64 (aarch64 Linux)
+
+Any stage can run inside a Docker image with `--docker IMAGE`. The project (and `--build-dir`, if
+given) is mounted at the same absolute path, so logs and CMake caches stay valid on the host.
+
+The `buildpulse/cross-arm64` image (`docker/cross-arm64.Dockerfile`) cross-compiles from an
+x86_64 Linux host to aarch64 Linux:
+
+| Piece | What it is |
+|-------|------------|
+| Compiler | Debian GCC 12 cross toolchain, `aarch64-linux-gnu-gcc/g++` |
+| Sysroot | `/opt/sysroot/aarch64-linux-gnu`, unpacked from Debian **bookworm arm64** packages — the same glibc 2.36 / libstdc++ as Raspberry Pi OS bookworm |
+| Toolchain file | `toolchains/aarch64-linux-gnu.cmake`, copied to `/opt/buildpulse/toolchains/` and set as `CMAKE_TOOLCHAIN_FILE`, so any CMake project cross-compiles without changes |
+| Emulator | `qemu-aarch64`, set as `CMAKE_CROSSCOMPILING_EMULATOR`, so `ctest` runs the aarch64 tests |
+
+```bash
+docker build -t buildpulse/cross-arm64 -f docker/cross-arm64.Dockerfile .
+
+# Your project (no preset needed: the image's CMAKE_TOOLCHAIN_FILE does the cross setup)
+buildpulse build -C ~/code/my-project --docker buildpulse/cross-arm64 --build-type Release
+
+# Your own build script, run inside the image
+buildpulse run --cwd ~/code/my-project --docker buildpulse/cross-arm64 -- ./build.sh
+
+# Internal sample project, via its linux-arm64 preset
+buildpulse build --preset linux-arm64 --docker buildpulse/cross-arm64
+```
+
+Libraries your project links against must exist in the sysroot. Add their arm64 `-dev` packages:
+
+```bash
+docker build -t buildpulse/cross-arm64 -f docker/cross-arm64.Dockerfile \
+  --build-arg SYSROOT_EXTRA_PACKAGES="zlib1g-dev:arm64 libssl-dev:arm64" .
+```
+
+On an Apple Silicon Mac, Docker can come from [Colima](https://github.com/abiosoft/colima):
+`brew install colima docker && colima start --vm-type vz --vz-rosetta`. The image is linux/amd64
+and runs under Rosetta. Colima only shares your home directory, so projects must live under `~`.
 
 ## Where the logs go
 
@@ -108,7 +149,7 @@ test BuildPulse itself**. For real work, always pass `-C <your project>` (or use
 | # | Feature | Status |
 |---|---------|--------|
 | 1 | Python `buildpulse` CLI + pytest: build any project, capture full logs | ✅ |
-| 2 | ARM64 cross-compilation in Docker (GCC + sysroot + CMake toolchain file) | ⬜ |
+| 2 | ARM64 cross-compilation in Docker (GCC + sysroot + CMake toolchain file) | ✅ |
 | 3 | Claude skill: CI log → root cause → fix PR | ⬜ |
 | 4 | Conan binary cache | ⬜ |
 | 5 | SBOM (Syft) + Trivy / Semgrep in the pipeline | ⬜ |

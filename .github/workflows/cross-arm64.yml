@@ -1,0 +1,34 @@
+name: cross-arm64
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: Build cross toolchain image (GCC 12 + bookworm arm64 sysroot)
+        run: docker build -t buildpulse/cross-arm64 -f docker/cross-arm64.Dockerfile .
+      - name: Cross-compile and test under QEMU
+        run: buildpulse build --preset linux-arm64 --docker buildpulse/cross-arm64 --log-dir build-logs
+      - name: Check the binary targets aarch64
+        run: file native/build/linux-arm64/pulse | tee /dev/stderr | grep -q "ARM aarch64"
+      - name: Triage build log on failure
+        if: failure()
+        run: buildpulse analyze-log build-logs/latest/full.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: linux-arm64-build
+          path: |
+            build-logs/
+            !build-logs/latest
+            native/build/linux-arm64/pulse
+            native/build/linux-arm64/pulse_tests

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from buildpulse import container
 from buildpulse.runner import Recorder, RunReport
 
 DEFAULT_BUILD_DIR = "build/buildpulse"
@@ -60,15 +61,21 @@ def run(
     build_dir: Path | None = None,
     run_tests: bool = True,
     clean: bool = False,
+    docker_image: str | None = None,
     echo: bool = True,
 ) -> RunReport:
     label = preset or f"plain-{build_type.lower()}"
     recorder = Recorder(log_dir, kind="build", label=label, project_dir=project_dir, echo=echo)
+    mounts = [project_dir] + ([build_dir] if build_dir else [])
+    platform = container.image_platform(docker_image) if docker_image else None
     for name, cmd in plan(project_dir, preset, build_type, build_dir, run_tests, clean):
+        if docker_image:
+            cmd = container.wrap(cmd, docker_image, project_dir, mounts, platform)
         if recorder.stage(name, cmd, cwd=project_dir).returncode != 0:
             break
     return recorder.finish(
         mode="preset" if preset else "plain",
+        docker_image=docker_image,
         preset=preset,
         build_type=None if preset else build_type,
         build_dir=None if preset else str(build_dir or project_dir / DEFAULT_BUILD_DIR),

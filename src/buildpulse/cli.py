@@ -27,6 +27,8 @@ def make_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--log-dir", type=Path, help="where run logs go (default: .buildpulse/runs)")
     p_build.add_argument("--no-test", action="store_true", help="skip the ctest stage")
     p_build.add_argument("--clean", action="store_true", help="reconfigure fresh and rebuild all")
+    p_build.add_argument("--docker", metavar="IMAGE",
+                         help="run every stage inside this Docker image (e.g. buildpulse/cross-arm64)")
     p_build.set_defaults(func=_run_build)
 
     p_run = sub.add_parser("run", help="run any build command or script and capture its log",
@@ -34,6 +36,7 @@ def make_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--cwd", type=Path, help="directory to run in (default: current directory)")
     p_run.add_argument("--name", help="label for this run (default: the command name)")
     p_run.add_argument("--log-dir", type=Path, help="where run logs go (default: .buildpulse/runs)")
+    p_run.add_argument("--docker", metavar="IMAGE", help="run the command inside this Docker image")
     p_run.add_argument("cmd", nargs=argparse.REMAINDER, help="the command to run, after --")
     p_run.set_defaults(func=_run_run)
 
@@ -67,6 +70,7 @@ def _run_build(args: argparse.Namespace) -> int:
         build_dir=args.build_dir.resolve() if args.build_dir else None,
         run_tests=not args.no_test,
         clean=args.clean,
+        docker_image=args.docker,
     )
     print(report.summary())
     return report.exit_code
@@ -83,6 +87,7 @@ def _run_run(args: argparse.Namespace) -> int:
         cwd=(args.cwd or Path.cwd()).resolve(),
         log_dir=(args.log_dir or cfg.log_dir).resolve(),
         name=args.name,
+        docker_image=args.docker,
     )
     print(report.summary())
     return report.exit_code

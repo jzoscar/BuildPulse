@@ -1,6 +1,10 @@
 {
   "version": 4,
-  "cmakeMinimumRequired": { "major": 3, "minor": 23, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "base",
@@ -12,29 +16,63 @@
       "name": "host-debug",
       "displayName": "Host (native compiler), Debug",
       "inherits": "base",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
     },
     {
       "name": "host-release",
       "displayName": "Host (native compiler), Release",
       "inherits": "base",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "linux-arm64",
+      "displayName": "Linux aarch64 (cross, GCC + sysroot), Release - run inside buildpulse/cross-arm64",
+      "inherits": "base",
+      "toolchainFile": "/opt/buildpulse/toolchains/aarch64-linux-gnu.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "host-debug", "configurePreset": "host-debug" },
-    { "name": "host-release", "configurePreset": "host-release" }
+    {
+      "name": "host-debug",
+      "configurePreset": "host-debug"
+    },
+    {
+      "name": "host-release",
+      "configurePreset": "host-release"
+    },
+    {
+      "name": "linux-arm64",
+      "configurePreset": "linux-arm64"
+    }
   ],
   "testPresets": [
     {
       "name": "host-debug",
       "configurePreset": "host-debug",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "host-release",
       "configurePreset": "host-release",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-arm64",
+      "configurePreset": "linux-arm64",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }
