@@ -5,7 +5,8 @@ log** — every stage, stdout and stderr, exit codes and timings — so the log 
 
 ```
 BuildPulse/
-├── src/buildpulse/        Python CLI (build, run, compare, analyze-log)
+├── src/buildpulse/        Python CLI (build, run, compare, triage, analyze-log)
+├── .claude/skills/        ci-triage agent skill for Claude Code
 ├── tests/                 pytest + real-world build log fixtures
 ├── native/                internal sample C++ project, used only to test BuildPulse itself
 ├── docker/                cross-compilation images
@@ -200,6 +201,54 @@ toolchain file via `tools.cmake.cmaketoolchain:user_toolchain`.
 | **Precompiled headers / unity builds** | `target_precompile_headers`, `CMAKE_UNITY_BUILD`: less repeated header parsing | Header-heavy C++ (Boost, Qt); speeds up cold builds too |
 | **Bazel / remote execution** | Content-addressed action cache shared by everyone, distributed builds | Very large mono-repos; a different build system |
 
+## Fix, don't just file: CI triage with Claude
+
+A red build should end in a reviewed fix PR, not in a ticket that says "here is a log".
+Two layers make that work:
+
+**1. `buildpulse triage`: deterministic evidence.** Turns a failed run into a compact bundle:
+category (`dependencies` / `configure` / `compile` / `link` / `test` / `command`), failing stage and
+command (Docker wrapper stripped), environment, extracted diagnostics, failed tests, the source lines
+each error points at (CI and container paths are mapped back to the local checkout), and the log
+tail. Every build workflow writes it to the job summary and the `build-logs` artifact on failure.
+
+```bash
+buildpulse triage                    # newest local run, Markdown
+buildpulse triage <run-id> --json    # for scripts and agents
+```
+
+An agent reading this bundle instead of a 10,000-line log gets the right context, uses far fewer
+tokens, and starts from the same facts a person would.
+
+**2. `.claude/skills/ci-triage`: the agent workflow, shared with the team.** A Claude Code skill
+that any developer (or CI) can invoke: collect evidence (`gh run download` + `buildpulse triage`),
+decide whether the failure is this change's fault or pre-existing on the base branch, classify and
+decide if the fix is within reach, find the root cause across toolchains, reproduce with the same
+preset/image, make the minimal fix (never by weakening tests or warnings), validate, open a PR
+against the failing branch, watch every check, and hand over **without merging**. Team knowledge
+lives next to it in `references/failure-patterns.md`.
+
+**CI: `ci-autofix.yml`.** When `ci`, `cross-arm64` or `windows-msvc` fails, runs Claude Code
+(`anthropics/claude-code-action`) with the skill. Opt-in: it does nothing until the repo has an
+`ANTHROPIC_API_KEY` secret. Guardrails: same-repository branches only (no secrets on fork code),
+never re-triggers on `fix/ci-*` branches, and it can open PRs and issues but never merges.
+
+### Worked example (PRs #1–#3)
+
+| Step | What happened |
+|------|---------------|
+| Change | [#1](https://github.com/jzoscar/BuildPulse/pull/1) adds an SSE `_mm_prefetch` to `crc32` for speed |
+| CI | Linux x64 ✅, **cross-arm64 ❌**, **windows-msvc ❌** |
+| Triage, arm64 | Bundle: `compile`, stage `build`, `checksum.cpp:6 xmmintrin.h: No such file or directory`, source context mapped from `/home/runner/...` to `src/checksum.cpp` |
+| Triage, Windows | No bundle (failed in pytest). `main` was red with the same failure → **pre-existing, not #1's fault**: triage printed `src\checksum.cpp` on Windows |
+| Fix A | [#2](https://github.com/jzoscar/BuildPulse/pull/2) → `main`: paths via `as_posix()`, `mkdir -p build-logs`. All checks ✅ |
+| Fix B | Reproduced locally in the cross image; [#3](https://github.com/jzoscar/BuildPulse/pull/3) → #1's branch: portable `prefetch()` (`__builtin_prefetch` / MSVC-only `_mm_prefetch`), no out-of-range pointers, new 4 KiB GTest. arm64 ✅ under QEMU |
+| Validate | #2 + #3 combined on a temporary branch: `windows-msvc` ✅ (MSVC 19.51, 4/4 tests), linked on #3 |
+| Hand over | Merge order #2 → main, main → feature, #3, #1. Merging is the owning team's call |
+
+Two failures in one PR, two different root causes, each fixed at the right place: that distinction
+is what the skill is for. Both lessons were added to `failure-patterns.md`.
+
 ## Where the logs go
 
 Every `build` or `run` creates a new run directory:
@@ -262,7 +311,7 @@ test BuildPulse itself**. For real work, always pass `-C <your project>` (or use
 |---|---------|--------|
 | 1 | Python `buildpulse` CLI + pytest: build any project, capture full logs | ✅ |
 | 2 | ARM64 cross-compilation in Docker (GCC + sysroot + CMake toolchain file) | ✅ |
-| 3 | Claude skill: CI log → root cause → fix PR | ⬜ |
+| 3 | Claude skill: CI log → root cause → fix PR (`buildpulse triage`, `ci-triage` skill, `ci-autofix`) | ✅ |
 | 4 | Build caching: Conan binary cache, ccache, Docker/CI caches, cold-vs-warm compare | ✅ |
 | 5 | SBOM (Syft) + Trivy / Semgrep in the pipeline | ⬜ |
 | 6 | Windows runner with MSVC (+ sccache, buildpulse tested on Windows) | ✅ |

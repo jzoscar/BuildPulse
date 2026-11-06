@@ -20,12 +20,21 @@ its command, the environment, the extracted diagnostics with source context, and
 ```bash
 gh run view <run-id> --json workflowName,headBranch,headSha,conclusion,jobs \
   -q '{wf: .workflowName, branch: .headBranch, sha: .headSha, failed: [.jobs[] | select(.conclusion=="failure") | .name]}'
-gh run download <run-id> -D .buildpulse/ci/<run-id>          # artifacts include build-logs/
+gh run download <run-id> -p '*-build' -D .buildpulse/ci/<run-id>   # build-logs/ + binaries
 buildpulse triage latest --log-dir .buildpulse/ci/<run-id>/<artifact>/build-logs
 ```
 
-If the job failed before buildpulse ran (checkout, setup, Docker image build), there is no
-bundle: read `gh run view <run-id> --log-failed` instead and go to step 2 with that.
+If the job failed before buildpulse ran (checkout, setup, pytest, Docker image build), there is
+no bundle: read `gh run view <run-id> --log-failed` instead and go to step 2 with that.
+
+**Is it this change's fault?** Check the same workflow on the base branch:
+
+```bash
+gh run list -b main -w <workflow> -L1 --json conclusion,headSha
+```
+
+If the base branch is red with the same failure, it is pre-existing: fix it on the base branch in
+its own PR, and say so on the original PR. Do not fold unrelated fixes into someone's feature.
 
 **Local run:** `buildpulse triage latest` (or a run id from `.buildpulse/runs/`).
 
@@ -122,6 +131,11 @@ Triage bundle: <attached or linked>
 ```
 
 If a check still fails, go back to step 1 with the new run. Do not stack speculative commits.
+
+If a check fails only because of a known, separately-fixed base-branch issue, validate the
+combination instead of waiting: merge both fixes into a temporary branch, run the workflow on it
+(`gh workflow run <workflow>.yml --ref <tmp-branch>`), link the run in a PR comment, and delete the
+temporary branch.
 
 ## 8. Hand over
 

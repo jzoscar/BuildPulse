@@ -41,6 +41,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
+          mkdir -p build-logs
           buildpulse triage latest --log-dir build-logs > build-logs/triage.md || true
           cat build-logs/triage.md | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
