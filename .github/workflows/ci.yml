@@ -25,8 +25,17 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - run: pip install -e .
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build ccache
+      - run: pip install -e ".[conan]"
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/buildpulse/conan2
+          key: conan-linux-x64-${{ hashFiles('native/conanfile.py') }}
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/buildpulse/ccache
+          key: ccache-linux-x64-${{ github.run_id }}
+          restore-keys: ccache-linux-x64-
       - run: buildpulse build --preset host-release --log-dir build-logs
       - name: Triage build log on failure
         if: failure()

@@ -23,16 +23,22 @@ target_compile_options(pulse PRIVATE ${PULSE_WARNINGS})
 
 if(PULSE_BUILD_TESTS)
   enable_testing()
-  # Temporary: fetched from source. Will move to Conan with binary caching later.
-  include(FetchContent)
-  FetchContent_Declare(
-    googletest
-    URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  )
-  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-  set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-  FetchContent_MakeAvailable(googletest)
+  # Prefer a prebuilt GTest (from Conan, see conanfile.py); fall back to building it from source.
+  find_package(GTest CONFIG QUIET)
+  if(GTest_FOUND)
+    message(STATUS "GTest: using package from ${GTest_DIR}")
+  else()
+    message(STATUS "GTest: not found as a package, fetching and building from source")
+    include(FetchContent)
+    FetchContent_Declare(
+      googletest
+      URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+  endif()
 
   add_executable(pulse_tests tests/test_checksum.cpp)
   target_link_libraries(pulse_tests PRIVATE pulse_core GTest::gtest_main)

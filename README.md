@@ -5,18 +5,20 @@ log** — every stage, stdout and stderr, exit codes and timings — so the log 
 
 ```
 BuildPulse/
-├── src/buildpulse/        Python CLI (build, run, analyze-log)
+├── src/buildpulse/        Python CLI (build, run, compare, analyze-log)
 ├── tests/                 pytest + real-world build log fixtures
 ├── native/                internal sample C++ project, used only to test BuildPulse itself
 ├── docker/                cross-compilation images
-├── toolchains/            CMake toolchain files
+├── toolchains/            CMake toolchain files, Conan profiles
 ├── buildpulse.toml        defaults for this repo (points at native/)
 └── .github/workflows/     CI
 ```
 
 ## Install
 
-Requires Python ≥ 3.11, CMake ≥ 3.24, a C/C++ compiler (Ninja for the `native/` presets), and Docker for cross-compilation.
+Requires Python ≥ 3.11, CMake ≥ 3.24, a C/C++ compiler (Ninja for the `native/` presets).
+Optional: Conan 2 (`pip install -e ".[conan]"`, included in `.[dev]`) and ccache for caching,
+Docker for cross-compilation.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -41,7 +43,9 @@ buildpulse build -C ~/code/my-project --no-test   # skip ctest
 buildpulse build -C ~/code/my-project --clean     # cmake --fresh + --clean-first
 ```
 
-Stages run in order (configure → build → test) and stop at the first failure. The exit code of
+Stages run in order (deps → configure → build → test) and stop at the first failure. The `deps`
+stage (`conan install`) only runs when the project has a `conanfile.py` / `conanfile.txt`; see
+[Build caching](#build-caching). The exit code of
 `buildpulse` is the exit code of the failing stage, so it can gate CI.
 
 ## Build with your own script
@@ -93,6 +97,72 @@ On an Apple Silicon Mac, Docker can come from [Colima](https://github.com/abioso
 `brew install colima docker && colima start --vm-type vz --vz-rosetta`. The image is linux/amd64
 and runs under Rosetta. Colima only shares your home directory, so projects must live under `~`.
 
+## Build caching
+
+Caches are **on by default**. Turn them off to get a cold, from-scratch baseline, then compare:
+
+| Flag | Effect |
+|------|--------|
+| *(none)* | Warm: reuse Conan packages (`--build=missing`) and ccache |
+| `--no-cache` | Cold: empty throwaway Conan cache, all deps rebuilt from source (`--build=*`), no ccache, clean build tree (`--clean`) |
+| `--no-conan-cache` | Only the Conan layer cold |
+| `--no-ccache` | Only ccache off |
+| `--deps conan\|none\|auto` | Force or skip the Conan `deps` stage (default `auto`: if a conanfile exists) |
+| `--cache-dir DIR` | Cache root (default `~/.cache/buildpulse`, or `[cache] dir` in `buildpulse.toml`) |
+
+```bash
+buildpulse build -C ~/code/my-project --no-cache   # cold baseline
+buildpulse build -C ~/code/my-project --clean      # warm-up: fills the caches
+buildpulse build -C ~/code/my-project --clean      # warm: clean build tree, caches filled
+buildpulse compare                                 # last two runs, stage by stage
+buildpulse compare 20261105-183909-linux-arm64 20261105-184015-linux-arm64
+```
+
+Every run records its cache settings and the ccache hit rate in `report.json` (`meta.cache`,
+`meta.ccache_stats`) and in the summary line, so timings are never compared blind.
+
+### Measured on the internal sample project
+
+| Build | Cold (`--no-cache`) | Warm (`--clean`, caches filled) | Speed-up |
+|-------|--------------------:|--------------------------------:|---------:|
+| macOS host, Debug — `deps` (GTest) | 7.52 s | 0.35 s | 21.7× |
+| macOS host, Debug — total | 9.34 s | 2.19 s | 4.3× |
+| aarch64 cross in Docker — `deps` (GTest) | 23.48 s | 2.74 s | 8.6× |
+| aarch64 cross in Docker — total | 34.22 s | 16.68 s | 2.1× |
+
+ccache hit 3/3 compilations on the warm runs. The sample project is tiny, so the dependency layer
+dominates; on a real code base the ccache share grows with the number of translation units.
+In Docker on a Mac every stage pays ~0.5–3 s of `docker run` start-up under Rosetta, which is why
+small stages such as `ccache-zero` look slow there; on a Linux CI runner that overhead is far smaller.
+A manual `cache-benchmark` job in the `cross-arm64` workflow (Actions → cross-arm64 → Run workflow)
+repeats the cold/warm comparison on a GitHub runner and writes the table to the job summary.
+
+### Caching layers
+
+| Layer | What it caches | Where | Status |
+|-------|----------------|-------|--------|
+| **Conan binary cache** | Prebuilt dependency packages (GTest here), keyed by settings: OS, arch, compiler, build type | `~/.cache/buildpulse/conan2/<env>/` (`CONAN_HOME`) | ✅ |
+| **ccache** | Object files of the project's own sources, keyed by compiler + flags + preprocessed source | `~/.cache/buildpulse/ccache/<env>/` (`CCACHE_DIR`), used via `CMAKE_<LANG>_COMPILER_LAUNCHER` | ✅ |
+| **CMake incremental build** | The build tree: only changed files are rebuilt, configure results reused | `build/<preset>` or `--build-dir`; `--clean` / `--no-cache` bypass it | ✅ (CMake + Ninja) |
+| **Docker layer cache** | The cross image (toolchain, sysroot, Conan, ccache) | Local Docker; in CI `type=gha` via `docker/build-push-action` | ✅ |
+| **CI caches** | Conan and ccache directories between workflow runs | `actions/cache` in `ci.yml` and `cross-arm64.yml` | ✅ |
+
+`<env>` is `host` or the Docker image name, so binaries from different toolchains never mix.
+The cross image ships Conan profiles (`toolchains/conan/linux-armv8`, `linux-x86_64`) through
+`CONAN_DEFAULT_PROFILE` / `CONAN_DEFAULT_BUILD_PROFILE`; the host profile chains the aarch64 CMake
+toolchain file via `tools.cmake.cmaketoolchain:user_toolchain`.
+
+### Related techniques not used (yet)
+
+| Technique | What it adds | When to reach for it |
+|-----------|--------------|----------------------|
+| **Conan remote** (Artifactory, `conan_server`) | Share dependency binaries across machines and CI: build once, upload, everyone downloads | A team or a CI fleet; the next step after the local cache |
+| **sccache** | ccache alternative with remote backends (S3, GCS, Redis, GitHub Actions cache) and MSVC support | Shared compiler cache across CI runners; Windows/MSVC builds |
+| **ccache remote storage** | ccache ≥ 4.4 can also use an HTTP/Redis secondary store | Same goal as sccache while staying on ccache |
+| **vcpkg binary caching** | vcpkg's equivalent of the Conan binary cache (files, NuGet, GHA) | Projects that use vcpkg instead of Conan |
+| **Precompiled headers / unity builds** | `target_precompile_headers`, `CMAKE_UNITY_BUILD`: less repeated header parsing | Header-heavy C++ (Boost, Qt); speeds up cold builds too |
+| **Bazel / remote execution** | Content-addressed action cache shared by everyone, distributed builds | Very large mono-repos; a different build system |
+
 ## Where the logs go
 
 Every `build` or `run` creates a new run directory:
@@ -138,6 +208,9 @@ preset = "host-debug"   # ignored when -C is given
 
 [logs]
 dir = ".buildpulse/runs"
+
+[cache]
+dir = "~/.cache/buildpulse"
 ```
 
 The `buildpulse.toml` in this repo points at `native/`, an **internal sample project used only to
@@ -151,7 +224,7 @@ test BuildPulse itself**. For real work, always pass `-C <your project>` (or use
 | 1 | Python `buildpulse` CLI + pytest: build any project, capture full logs | ✅ |
 | 2 | ARM64 cross-compilation in Docker (GCC + sysroot + CMake toolchain file) | ✅ |
 | 3 | Claude skill: CI log → root cause → fix PR | ⬜ |
-| 4 | Conan binary cache | ⬜ |
+| 4 | Build caching: Conan binary cache, ccache, Docker/CI caches, cold-vs-warm compare | ✅ |
 | 5 | SBOM (Syft) + Trivy / Semgrep in the pipeline | ⬜ |
 | 6 | Windows runner with MSVC | ⬜ |
 | 7 | Raspberry Pi device test rig running GTest | ⬜ |

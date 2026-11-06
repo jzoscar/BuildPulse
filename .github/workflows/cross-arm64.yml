@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   linux-arm64:
@@ -14,8 +15,32 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e .
+
+      # Cache 1: Docker layers of the cross image, so it is only rebuilt when the
+      # Dockerfile or toolchain files change.
+      - uses: docker/setup-buildx-action@v4
       - name: Build cross toolchain image (GCC 12 + bookworm arm64 sysroot)
-        run: docker build -t buildpulse/cross-arm64 -f docker/cross-arm64.Dockerfile .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/cross-arm64.Dockerfile
+          tags: buildpulse/cross-arm64
+          load: true
+          cache-from: type=gha,scope=cross-arm64
+          cache-to: type=gha,mode=max,scope=cross-arm64
+
+      # Cache 2+3: Conan package binaries and ccache objects, under ~/.cache/buildpulse.
+      # Conan: keyed on the dependency inputs. ccache: a new entry every run, restored by prefix.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/buildpulse/conan2
+          key: conan-arm64-${{ hashFiles('native/conanfile.py', 'toolchains/conan/*', 'docker/cross-arm64.Dockerfile') }}
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/buildpulse/ccache
+          key: ccache-arm64-${{ github.run_id }}
+          restore-keys: ccache-arm64-
+
       - name: Cross-compile and test under QEMU
         run: buildpulse build --preset linux-arm64 --docker buildpulse/cross-arm64 --log-dir build-logs
       - name: Check the binary targets aarch64
@@ -32,3 +57,26 @@ jobs:
             !build-logs/latest
             native/build/linux-arm64/pulse
             native/build/linux-arm64/pulse_tests
+
+  # Manual (Actions > cross-arm64 > Run workflow): cold vs warm on the same runner, to measure what the caches buy.
+  cache-benchmark:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - run: docker build -t buildpulse/cross-arm64 -f docker/cross-arm64.Dockerfile .
+      - name: Cold (no caches)
+        run: buildpulse build --preset linux-arm64 --docker buildpulse/cross-arm64 --no-cache --log-dir bench
+      - name: Warm-up (fills Conan cache and ccache)
+        run: buildpulse build --preset linux-arm64 --docker buildpulse/cross-arm64 --clean --log-dir bench
+      - name: Warm (clean build tree, caches filled)
+        run: buildpulse build --preset linux-arm64 --docker buildpulse/cross-arm64 --clean --log-dir bench
+      - name: Compare cold vs warm
+        run: |
+          runs=($(ls -d bench/2* | sort))
+          { echo '```'; buildpulse compare "${runs[0]}" "${runs[2]}"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+        shell: bash

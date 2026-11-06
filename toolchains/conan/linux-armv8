@@ -1,0 +1,20 @@
+# Conan host profile: aarch64 Linux, GCC 12 cross compiler, Debian bookworm sysroot.
+# Used inside docker/cross-arm64.Dockerfile (CONAN_DEFAULT_PROFILE points here).
+[settings]
+os=Linux
+arch=armv8
+compiler=gcc
+compiler.version=12
+compiler.libcxx=libstdc++11
+compiler.cppstd=17
+build_type=Release
+
+[buildenv]
+CC=aarch64-linux-gnu-gcc
+CXX=aarch64-linux-gnu-g++
+
+[conf]
+tools.build:compiler_executables={"c": "aarch64-linux-gnu-gcc", "cpp": "aarch64-linux-gnu-g++"}
+tools.build:sysroot=/opt/sysroot/aarch64-linux-gnu
+tools.cmake.cmaketoolchain:user_toolchain=["/opt/buildpulse/toolchains/aarch64-linux-gnu.cmake"]
+tools.cmake.cmaketoolchain:generator=Ninja

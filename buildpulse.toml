@@ -8,3 +8,6 @@ preset = "host-debug"   # omit to build without CMakePresets.json
 
 [logs]
 dir = ".buildpulse/runs"
+
+[cache]
+dir = "~/.cache/buildpulse"   # Conan packages and ccache objects, per environment

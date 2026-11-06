@@ -32,6 +32,7 @@ class Stage:
     returncode: int
     seconds: float
     log: str  # relative to the run directory
+    env: dict[str, str] = field(default_factory=dict)  # variables set on top of os.environ
 
 
 @dataclass
@@ -59,9 +60,14 @@ class RunReport:
         lines = [f"run: {self.run_id}  ({self.kind}, {self.project_dir})"]
         for s in self.stages:
             status = "ok" if s.returncode == 0 else f"FAILED ({s.returncode})"
-            lines.append(f"  {s.name:<10} {s.seconds:7.2f}s  {status}")
+            lines.append(f"  {s.name:<13} {s.seconds:7.2f}s  {status}")
         total = sum(s.seconds for s in self.stages)
-        lines.append(f"  {'total':<10} {total:7.2f}s  {'ok' if self.ok else 'FAILED'}")
+        lines.append(f"  {'total':<13} {total:7.2f}s  {'ok' if self.ok else 'FAILED'}")
+        if self.meta.get("cache"):
+            c, stats = self.meta["cache"], self.meta.get("ccache_stats")
+            hits = f" (hits {stats['hits']}/{stats['cacheable_calls']})" if stats else ""
+            ccache = "on" if c["ccache"] else "off"
+            lines.append(f"cache:  conan={c['conan']}  ccache={ccache}{hits}")
         lines.append(f"log:    {Path(self.run_dir) / self.full_log}")
         lines.append(f"report: {Path(self.run_dir) / 'report.json'}")
         return "\n".join(lines)
@@ -98,17 +104,23 @@ class Recorder:
             run_dir=str(self.run_dir),
         )
 
-    def stage(self, name: str, command: list[str], cwd: Path) -> Stage:
+    def stage(
+        self, name: str, command: list[str], cwd: Path, env: dict[str, str] | None = None
+    ) -> Stage:
         index = len(self.report.stages) + 1
         rel_log = f"stages/{index:02d}-{_slug(name)}.log"
-        header = f"==> [{name}] {shlex.join(command)}  (cwd: {cwd})\n".encode()
+        env = env or {}
+        header = f"==> [{name}] {shlex.join(command)}  (cwd: {cwd})\n"
+        if env:
+            header += "    env: " + " ".join(f"{k}={v}" for k, v in env.items()) + "\n"
 
         start = time.monotonic()
         with open(self.run_dir / "full.log", "ab") as full, open(self.run_dir / rel_log, "wb") as part:
-            self._emit(header, full, part)
+            self._emit(header.encode(), full, part)
             try:
                 proc = subprocess.Popen(
-                    command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+                    command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    env={**os.environ, **env},
                 )
             except OSError as exc:
                 self._emit(f"buildpulse: cannot start command: {exc}\n".encode(), full, part)
@@ -120,7 +132,7 @@ class Recorder:
             elapsed = time.monotonic() - start
             self._emit(f"<== [{name}] exit {returncode} in {elapsed:.2f}s\n\n".encode(), full, part)
 
-        stage = Stage(name, command, str(cwd), returncode, round(elapsed, 3), rel_log)
+        stage = Stage(name, command, str(cwd), returncode, round(elapsed, 3), rel_log, env)
         self.report.stages.append(stage)
         self._write_report()
         return stage

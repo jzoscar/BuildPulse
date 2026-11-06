@@ -8,6 +8,7 @@ from pathlib import Path
 
 CONFIG_NAME = "buildpulse.toml"
 DEFAULT_LOG_DIR = ".buildpulse/runs"
+DEFAULT_CACHE_DIR = "~/.cache/buildpulse"
 
 
 @dataclass
@@ -17,6 +18,7 @@ class Config:
     preset: str | None
     build_type: str
     log_dir: Path
+    cache_dir: Path
     source: Path | None  # the buildpulse.toml that was loaded, if any
 
 
@@ -35,11 +37,13 @@ def load(start: Path) -> Config:
     data = tomllib.loads(source.read_text()) if source else {}
     project = data.get("project", {})
     logs = data.get("logs", {})
+    caches = data.get("cache", {})
     return Config(
         root=root,
         project_dir=(root / project.get("dir", ".")).resolve(),
         preset=project.get("preset"),
         build_type=project.get("build_type", "Debug"),
         log_dir=(root / logs.get("dir", DEFAULT_LOG_DIR)).resolve(),
+        cache_dir=(root / Path(caches.get("dir", DEFAULT_CACHE_DIR)).expanduser()).resolve(),
         source=source,
     )

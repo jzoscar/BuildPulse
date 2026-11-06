@@ -1,0 +1,5 @@
+# Conan build profile: the x86_64 Linux machine the cross image runs on.
+[settings]
+os=Linux
+arch=x86_64
+build_type=Release

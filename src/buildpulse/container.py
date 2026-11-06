@@ -24,7 +24,12 @@ def image_platform(image: str) -> str | None:
 
 
 def wrap(
-    command: list[str], image: str, cwd: Path, mounts: list[Path], platform: str | None = None
+    command: list[str],
+    image: str,
+    cwd: Path,
+    mounts: list[Path],
+    platform: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> list[str]:
     docker = ["docker", "run", "--rm", "-w", str(cwd)]
     if platform:
@@ -35,4 +40,6 @@ def wrap(
     if hasattr(os, "getuid"):
         # Files written to the mounts belong to the host user, not root.
         docker += ["--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp"]
+    for key, value in (env or {}).items():
+        docker += ["-e", f"{key}={value}"]
     return [*docker, image, *command]
