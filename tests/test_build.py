@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 from buildpulse import cache
@@ -16,8 +17,8 @@ def caches(conan_cache=True, ccache=True):
         conan_home=Path("/c/conan2/host"),
         conan_build="missing" if conan_cache else "*",
         conan_cached=conan_cache,
-        ccache=ccache,
-        ccache_dir=Path("/c/ccache/host") if ccache else None,
+        compiler_cache="ccache" if ccache else None,
+        compiler_cache_dir=Path("/c/ccache/host") if ccache else None,
     )
 
 
@@ -34,11 +35,11 @@ def test_plan_without_tests():
 
 def test_plain_plan_uses_explicit_source_and_build_dirs():
     stages = dict(build.plan(build.BuildOptions(PROJ, build_type="Release")))
+    build_dir = str(PROJ / "build" / "buildpulse")
     assert stages["configure"] == [
-        "cmake", "-S", "/src/proj", "-B", "/src/proj/build/buildpulse",
-        "-DCMAKE_BUILD_TYPE=Release",
+        "cmake", "-S", str(PROJ), "-B", build_dir, "-DCMAKE_BUILD_TYPE=Release",
     ]
-    assert stages["test"][:3] == ["ctest", "--test-dir", "/src/proj/build/buildpulse"]
+    assert stages["test"][:3] == ["ctest", "--test-dir", build_dir]
 
 
 def test_clean_reconfigures_fresh_and_rebuilds():
@@ -52,12 +53,12 @@ def test_conan_project_gets_deps_stage_and_toolchain(tmp_path):
     opts = build.BuildOptions(tmp_path, build_type="Release", caches=caches())
     stages = dict(build.plan(opts))
     assert list(stages) == [
-        "conan-profile", "deps", "configure", "ccache-zero", "build", "ccache-stats", "test",
+        "conan-profile", "deps", "configure", "cache-zero", "build", "cache-stats", "test",
     ]
     assert "--build=missing" in stages["deps"]
     assert "build_type=Release" in stages["deps"]
     toolchain = tmp_path / "build" / "conan" / "plain-release" / "conan_toolchain.cmake"
-    assert f"-DCMAKE_TOOLCHAIN_FILE={toolchain}" in stages["configure"]
+    assert f"-DCMAKE_TOOLCHAIN_FILE={toolchain.as_posix()}" in stages["configure"]
     assert "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache" in stages["configure"]
 
 
@@ -67,7 +68,7 @@ def test_cold_cache_rebuilds_deps_and_disables_ccache(tmp_path):
     stages = dict(build.plan(opts))
     assert "--build=*" in stages["deps"]
     assert "-DCMAKE_CXX_COMPILER_LAUNCHER=" in stages["configure"]
-    assert "ccache-zero" not in stages
+    assert "cache-zero" not in stages
 
 
 def test_deps_none_skips_conan_and_docker_skips_profile_detect(tmp_path):
@@ -94,8 +95,10 @@ def test_validate(tmp_path):
 
 
 def test_run_stops_at_first_failure_and_records_it(tmp_path, monkeypatch):
+    ok, fail = [sys.executable, "-c", "pass"], [sys.executable, "-c", "raise SystemExit(1)"]
+
     def fake_plan(opts):
-        return [("configure", ["true"]), ("build", ["false"]), ("test", ["true"])]
+        return [("configure", ok), ("build", fail), ("test", ok)]
 
     monkeypatch.setattr(build, "plan", fake_plan)
     report = build.run(build.BuildOptions(tmp_path, preset="p"), tmp_path / "logs", echo=False)
@@ -106,3 +109,13 @@ def test_run_stops_at_first_failure_and_records_it(tmp_path, monkeypatch):
     assert data["ok"] is False
     assert data["exit_code"] == 1
     assert data["meta"]["mode"] == "preset"
+
+
+def test_deps_stage_pins_conan_generator_to_preset(tmp_path):
+    (tmp_path / "conanfile.py").write_text("")
+    (tmp_path / "CMakePresets.json").write_text(json.dumps({"configurePresets": [
+        {"name": "base", "generator": "Ninja"},
+        {"name": "win", "inherits": "base"},
+    ]}))
+    deps = dict(build.plan(build.BuildOptions(tmp_path, preset="win")))["deps"]
+    assert deps[-2:] == ["-c", "tools.cmake.cmaketoolchain:generator=Ninja"]

@@ -5,12 +5,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from buildpulse.cache import describe_compiler_cache
+from buildpulse.runner import latest_run
+
 
 def resolve_run(ref: str, log_dir: Path) -> Path:
     """Accept a run directory, a report.json path, a run id, or "latest"."""
     path = Path(ref)
     if path.is_file():
         return path
+    if ref == "latest" and (run_dir := latest_run(log_dir)):
+        return run_dir / "report.json"
     for candidate in (path / "report.json", log_dir / ref / "report.json"):
         if candidate.is_file():
             return candidate
@@ -28,8 +33,8 @@ def _cache_label(report: dict) -> str:
     cache = meta.get("cache")
     if not cache:
         return "-"
-    label = f"conan={cache['conan']} ccache={'on' if cache['ccache'] else 'off'}"
-    stats = meta.get("ccache_stats")
+    label = f"conan={cache['conan']} compiler-cache={describe_compiler_cache(cache)}"
+    stats = meta.get("compiler_cache_stats") or meta.get("ccache_stats")
     if stats:
         label += f" ({stats['hits']}/{stats['cacheable_calls']} hits)"
     return label

@@ -31,6 +31,16 @@ def test_clean_log_has_no_issues():
     assert analyze_log.parse("[1/1] Linking CXX executable app\n") == []
 
 
+def test_cli_accepts_run_reference(tmp_path, capsys):
+    run_dir = tmp_path / "20260101-000000-x"
+    run_dir.mkdir()
+    (run_dir / "full.log").write_text((LOGS / "ld_undefined.log").read_text())
+    (tmp_path / "latest.txt").write_text(run_dir.name)
+    assert main(["analyze-log", "latest", "--log-dir", str(tmp_path)]) == 1
+    assert "undefined reference" in capsys.readouterr().out
+    assert main(["analyze-log", "nope", "--log-dir", str(tmp_path)]) == 2
+
+
 def test_cli_exit_code_reflects_errors(capsys):
     assert main(["analyze-log", str(LOGS / "gcc_undeclared.log")]) == 1
     assert "1 error(s), 1 warning(s)" in capsys.readouterr().out

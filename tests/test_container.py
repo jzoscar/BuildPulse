@@ -1,6 +1,12 @@
+import sys
 from pathlib import Path
 
+import pytest
+
 from buildpulse import container
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="Docker build containers are Linux; paths are POSIX")
 
 
 def test_wrap_mounts_paths_at_same_location_and_keeps_command():

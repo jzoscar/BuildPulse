@@ -36,6 +36,21 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "windows-msvc",
+      "displayName": "Windows x64, MSVC (cl), Release - run from a VS developer environment",
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
     }
   ],
   "buildPresets": [
@@ -50,6 +65,10 @@
     {
       "name": "linux-arm64",
       "configurePreset": "linux-arm64"
+    },
+    {
+      "name": "windows-msvc",
+      "configurePreset": "windows-msvc"
     }
   ],
   "testPresets": [
@@ -70,6 +89,13 @@
     {
       "name": "linux-arm64",
       "configurePreset": "linux-arm64",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc",
+      "configurePreset": "windows-msvc",
       "output": {
         "outputOnFailure": true
       }

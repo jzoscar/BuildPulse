@@ -1,0 +1,59 @@
+name: windows-msvc
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  msvc-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+
+      # buildpulse itself must work on Windows too (paths, latest-run marker, log encoding).
+      - name: pytest (buildpulse on Windows)
+        run: pytest -q
+
+      # cl.exe, link.exe and the Windows SDK on PATH, as in a VS x64 Native Tools prompt.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Ensure Ninja
+        run: if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) { choco install ninja -y }
+      # sccache rather than ccache: first-class MSVC support.
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/buildpulse/conan2
+          key: conan-windows-msvc-${{ hashFiles('native/conanfile.py') }}
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/buildpulse/sccache
+          key: sccache-windows-msvc-${{ github.run_id }}
+          restore-keys: sccache-windows-msvc-
+
+      - name: Build and test with MSVC
+        run: buildpulse build --preset windows-msvc --compiler-cache sccache --log-dir build-logs
+      - name: Check the binary is a Windows x64 executable
+        run: |
+          Get-Item native/build/windows-msvc/pulse.exe
+          native/build/windows-msvc/pulse.exe 123456789
+      - name: Triage build log on failure
+        if: failure()
+        run: buildpulse analyze-log latest --log-dir build-logs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-msvc-build
+          path: |
+            build-logs/
+            !build-logs/latest
+            native/build/windows-msvc/pulse.exe
+            native/build/windows-msvc/pulse_tests.exe

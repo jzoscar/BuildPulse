@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 3.23)
+# MSVC: put debug info in the object files (/Z7) instead of a shared PDB (/Zi) so that
+# sccache/ccache can cache them. Needs policy CMP0141 (CMake >= 3.25).
+if(POLICY CMP0141)
+  cmake_policy(SET CMP0141 NEW)
+  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
+endif()
 project(pulse VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)

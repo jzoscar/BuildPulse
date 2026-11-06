@@ -7,7 +7,8 @@ Every invocation gets its own run directory:
         stages/01-<name>.log  one file per stage
         report.json           what ran, where, how long, exit codes, log paths
 
-and <log_dir>/latest points at the newest run.
+and <log_dir>/latest points at the newest run (a symlink, plus a latest.txt file holding the run id
+for platforms where symlinks are not available, e.g. Windows without the privilege).
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+
+from buildpulse.cache import describe_compiler_cache as cache_label
 
 
 @dataclass
@@ -64,10 +67,11 @@ class RunReport:
         total = sum(s.seconds for s in self.stages)
         lines.append(f"  {'total':<13} {total:7.2f}s  {'ok' if self.ok else 'FAILED'}")
         if self.meta.get("cache"):
-            c, stats = self.meta["cache"], self.meta.get("ccache_stats")
+            c = self.meta["cache"]
+            stats = self.meta.get("compiler_cache_stats") or self.meta.get("ccache_stats")
             hits = f" (hits {stats['hits']}/{stats['cacheable_calls']})" if stats else ""
-            ccache = "on" if c["ccache"] else "off"
-            lines.append(f"cache:  conan={c['conan']}  ccache={ccache}{hits}")
+            tool = cache_label(c)
+            lines.append(f"cache:  conan={c['conan']}  compiler-cache={tool}{hits}")
         lines.append(f"log:    {Path(self.run_dir) / self.full_log}")
         lines.append(f"report: {Path(self.run_dir) / 'report.json'}")
         return "\n".join(lines)
@@ -76,6 +80,19 @@ class RunReport:
         return json.dumps(
             {**asdict(self), "ok": self.ok, "exit_code": self.exit_code}, indent=2
         )
+
+
+def latest_run(log_dir: Path) -> Path | None:
+    """The newest run directory in `log_dir`, via the latest symlink or the latest.txt file."""
+    link = log_dir / "latest"
+    if link.is_dir():
+        return link.resolve()
+    marker = log_dir / "latest.txt"
+    if marker.is_file():
+        run_dir = log_dir / marker.read_text().strip()
+        if run_dir.is_dir():
+            return run_dir
+    return None
 
 
 def _slug(text: str) -> str:
@@ -157,10 +174,11 @@ class Recorder:
         (self.run_dir / "report.json").write_text(self.report.to_json())
 
     def _point_latest(self) -> None:
+        (self.log_dir / "latest.txt").write_text(self.run_dir.name + "\n")
         latest = self.log_dir / "latest"
         try:
             if latest.is_symlink() or latest.exists():
                 latest.unlink()
             os.symlink(self.run_dir.name, latest, target_is_directory=True)
         except OSError:
-            pass  # e.g. Windows without symlink rights; report.json still has run_dir
+            pass  # e.g. Windows without symlink rights; the latest.txt file still works

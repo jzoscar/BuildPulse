@@ -5,8 +5,8 @@ Two CMake modes:
   plain   `cmake -S <project> -B <build-dir>` — for projects without CMakePresets.json
 
 If the project has a conanfile.py/conanfile.txt, a `deps` stage runs `conan install` first and
-the configure stage uses the generated conan_toolchain.cmake. With caching on, ccache is set as
-the compiler launcher and its hit rate is recorded.
+the configure stage uses the generated conan_toolchain.cmake. With caching on, ccache or sccache
+is set as the compiler launcher and its hit rate is recorded.
 """
 
 from __future__ import annotations
@@ -55,8 +55,8 @@ class BuildOptions:
         return self.build_type
 
 
-def preset_build_type(project_dir: Path, preset: str) -> str | None:
-    """CMAKE_BUILD_TYPE of a configure preset, following `inherits`."""
+def _preset_lookup(project_dir: Path, preset: str, get) -> str | None:
+    """First non-empty `get(preset_dict)` along a configure preset's `inherits` chain."""
     try:
         data = json.loads((project_dir / "CMakePresets.json").read_text())
     except (OSError, ValueError):
@@ -65,12 +65,23 @@ def preset_build_type(project_dir: Path, preset: str) -> str | None:
     pending = [preset]
     while pending:
         current = presets.get(pending.pop(0), {})
-        value = current.get("cacheVariables", {}).get("CMAKE_BUILD_TYPE")
+        value = get(current)
         if value:
             return value["value"] if isinstance(value, dict) else value
         inherits = current.get("inherits", [])
         pending.extend([inherits] if isinstance(inherits, str) else inherits)
     return None
+
+
+def preset_build_type(project_dir: Path, preset: str) -> str | None:
+    """CMAKE_BUILD_TYPE of a configure preset, following `inherits`."""
+    return _preset_lookup(
+        project_dir, preset, lambda p: p.get("cacheVariables", {}).get("CMAKE_BUILD_TYPE"))
+
+
+def preset_generator(project_dir: Path, preset: str) -> str | None:
+    """CMake generator of a configure preset, following `inherits`."""
+    return _preset_lookup(project_dir, preset, lambda p: p.get("generator"))
 
 
 def plan(opts: BuildOptions) -> list[tuple[str, list[str]]]:
@@ -88,6 +99,11 @@ def plan(opts: BuildOptions) -> list[tuple[str, list[str]]]:
             f"--build={conan_build}",
             "-s", f"build_type={opts.effective_build_type}",
         ]))
+        generator = preset_generator(opts.project_dir, opts.preset) if opts.preset else None
+        if generator:
+            # conan_toolchain.cmake must match the generator, e.g. no VS platform/toolset
+            # settings when MSVC builds use Ninja.
+            stages[-1][1].extend(["-c", f"tools.cmake.cmaketoolchain:generator={generator}"])
 
     if opts.preset:
         configure = ["cmake", "--preset", opts.preset]
@@ -101,23 +117,24 @@ def plan(opts: BuildOptions) -> list[tuple[str, list[str]]]:
         test = ["ctest", "--test-dir", str(build_dir), "--output-on-failure"]
 
     if opts.uses_conan:
-        configure.append(f"-DCMAKE_TOOLCHAIN_FILE={opts.conan_output / 'conan_toolchain.cmake'}")
+        toolchain = (opts.conan_output / "conan_toolchain.cmake").as_posix()
+        configure.append(f"-DCMAKE_TOOLCHAIN_FILE={toolchain}")
+    tool = opts.caches.compiler_cache if opts.caches else None
     if opts.caches is not None:
-        # Always explicit, so turning ccache off also takes effect in an existing build tree.
-        launcher = "ccache" if opts.caches.ccache else ""
+        # Always explicit, so turning the cache off also takes effect in an existing build tree.
+        launcher = tool or ""
         configure += [f"-DCMAKE_C_COMPILER_LAUNCHER={launcher}",
                       f"-DCMAKE_CXX_COMPILER_LAUNCHER={launcher}"]
     if opts.clean:
         configure.append("--fresh")
         build.append("--clean-first")
 
-    ccache_on = opts.caches is not None and opts.caches.ccache
     stages.append(("configure", configure))
-    if ccache_on:
-        stages.append(("ccache-zero", ["ccache", "--zero-stats"]))
+    if tool:
+        stages.append(("cache-zero", [tool, "--zero-stats"]))
     stages.append(("build", build))
-    if ccache_on:
-        stages.append(("ccache-stats", ["ccache", "--show-stats"]))
+    if tool:
+        stages.append(("cache-stats", [tool, "--show-stats"]))
     if opts.run_tests:
         stages.append(("test", test))
     return stages
@@ -144,13 +161,14 @@ def run(
               *(opts.caches.mounts if opts.caches else [])]
     platform = container.image_platform(docker_image) if docker_image else None
 
-    ccache_stats = None
+    cache_stats = None
     for name, cmd in plan(opts):
         if docker_image:
             cmd = container.wrap(cmd, docker_image, opts.project_dir, mounts, platform, env)
         stage = recorder.stage(name, cmd, cwd=opts.project_dir, env=env)
-        if name == "ccache-stats":
-            ccache_stats = cache.parse_ccache_hits((recorder.run_dir / stage.log).read_text())
+        if name == "cache-stats" and opts.caches and opts.caches.compiler_cache:
+            output = (recorder.run_dir / stage.log).read_text(errors="replace")
+            cache_stats = cache.parse_stats(opts.caches.compiler_cache, output)
         if stage.returncode != 0:
             break
 
@@ -164,6 +182,6 @@ def run(
         ),
         deps="conan" if opts.uses_conan else "none",
         cache=opts.caches.describe() if opts.caches else None,
-        ccache_stats=ccache_stats,
+        compiler_cache_stats=cache_stats,
         clean=opts.clean,
     )

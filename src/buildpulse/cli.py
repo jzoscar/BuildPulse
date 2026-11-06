@@ -8,6 +8,7 @@ from pathlib import Path
 
 from buildpulse import __version__, cache, config
 from buildpulse.commands import analyze_log, build, compare, run
+from buildpulse.runner import latest_run
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -36,10 +37,14 @@ def make_parser() -> argparse.ArgumentParser:
                          help="auto: run `conan install` if the project has a conanfile (default)")
     caching.add_argument("--no-cache", action="store_true",
                          help="cold build: empty Conan cache + rebuild all deps from source, "
-                              "no ccache, clean build tree")
+                              "no compiler cache, clean build tree")
     caching.add_argument("--no-conan-cache", action="store_true",
                          help="use an empty Conan cache and build all deps from source")
-    caching.add_argument("--no-ccache", action="store_true", help="don't use ccache")
+    caching.add_argument("--compiler-cache", choices=["auto", "ccache", "sccache", "none"],
+                         default="auto",
+                         help="compiler launcher cache; auto: ccache, else sccache, if installed")
+    caching.add_argument("--no-compiler-cache", "--no-ccache", action="store_true",
+                         help="same as --compiler-cache none")
     caching.add_argument("--cache-dir", type=Path,
                          help="cache root (default: [cache] dir in buildpulse.toml, "
                               "else ~/.cache/buildpulse)")
@@ -62,7 +67,8 @@ def make_parser() -> argparse.ArgumentParser:
     p_cmp.set_defaults(func=_run_compare)
 
     p_log = sub.add_parser("analyze-log", help="extract compiler/linker errors from a build log")
-    p_log.add_argument("logfile", type=Path)
+    p_log.add_argument("logfile", help="a log file, a run directory, a run id, or 'latest'")
+    p_log.add_argument("--log-dir", type=Path, help="where run logs are (default: .buildpulse/runs)")
     p_log.add_argument("--json", action="store_true", help="print machine-readable JSON")
     p_log.set_defaults(func=_run_analyze_log)
 
@@ -87,7 +93,8 @@ def _run_build(args: argparse.Namespace) -> int:
         args.cache_dir or cfg.cache_dir,
         docker_image=args.docker,
         conan_cache=not (args.no_cache or args.no_conan_cache),
-        ccache=not (args.no_cache or args.no_ccache),
+        compiler_cache="none" if (args.no_cache or args.no_compiler_cache)
+        else args.compiler_cache,
     )
     opts = build.BuildOptions(
         project_dir=project_dir,
@@ -137,8 +144,23 @@ def _run_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_log(ref: str, log_dir: Path) -> Path | None:
+    path = Path(ref)
+    if path.is_file():
+        return path
+    run_dir = latest_run(log_dir) if ref == "latest" else (
+        path if path.is_dir() else log_dir / ref)
+    full_log = run_dir / "full.log" if run_dir else None
+    return full_log if full_log and full_log.is_file() else None
+
+
 def _run_analyze_log(args: argparse.Namespace) -> int:
-    issues = analyze_log.parse(args.logfile.read_text(errors="replace"))
+    log_dir = (args.log_dir or config.load(Path.cwd()).log_dir).resolve()
+    logfile = _resolve_log(args.logfile, log_dir)
+    if logfile is None:
+        print(f"buildpulse: no log '{args.logfile}' (looked in {log_dir})", file=sys.stderr)
+        return 2
+    issues = analyze_log.parse(logfile.read_text(errors="replace"))
     print(analyze_log.render(issues, as_json=args.json))
     return 1 if any(i.severity == "error" for i in issues) else 0
 

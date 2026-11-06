@@ -17,7 +17,7 @@ BuildPulse/
 ## Install
 
 Requires Python ≥ 3.11, CMake ≥ 3.24, a C/C++ compiler (Ninja for the `native/` presets).
-Optional: Conan 2 (`pip install -e ".[conan]"`, included in `.[dev]`) and ccache for caching,
+Optional: Conan 2 (`pip install -e ".[conan]"`, included in `.[dev]`) and ccache or sccache for caching,
 Docker for cross-compilation.
 
 ```bash
@@ -97,16 +97,41 @@ On an Apple Silicon Mac, Docker can come from [Colima](https://github.com/abioso
 `brew install colima docker && colima start --vm-type vz --vz-rosetta`. The image is linux/amd64
 and runs under Rosetta. Colima only shares your home directory, so projects must live under `~`.
 
+## Build with MSVC on Windows
+
+The same project, the same tool, a different compiler: `windows-msvc` builds with MSVC (`cl.exe`)
+and Ninja from a Visual Studio developer environment.
+
+```powershell
+# In an "x64 Native Tools Command Prompt for VS" (or after ilammy/msvc-dev-cmd in CI)
+pip install -e ".[conan]"
+buildpulse build --preset windows-msvc --compiler-cache sccache
+```
+
+| Piece | What it is |
+|-------|------------|
+| Compiler | MSVC 19.5x (`cl.exe`), x64, `/W4 /permissive-`, set by the `windows-msvc` preset |
+| Generator | Ninja (compiler launchers such as sccache only work with Ninja/Makefiles, not the VS generator) |
+| Dependencies | Conan with the detected `msvc` profile (`compiler.version=195`, dynamic runtime); `buildpulse` pins Conan's CMake toolchain to the preset's generator so it does not emit Visual Studio platform/toolset settings |
+| Compiler cache | **sccache** (first-class MSVC support). `CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded` (`/Z7`, policy CMP0141) keeps debug info in the objects so they are cacheable |
+| CI | `.github/workflows/windows-msvc.yml` on `windows-latest`: runs the pytest suite on Windows first (buildpulse itself must be portable), then builds, runs the GTest suite and the binary |
+
+No local Windows machine is needed: GitHub-hosted Windows runners are free for public repositories.
+Portability fixes this surfaced in buildpulse: `latest` is a symlink plus a `latest.txt` marker
+(symlinks need a privilege on Windows), toolchain paths are passed with forward slashes, and the
+test suite no longer assumes POSIX commands.
+
 ## Build caching
 
 Caches are **on by default**. Turn them off to get a cold, from-scratch baseline, then compare:
 
 | Flag | Effect |
 |------|--------|
-| *(none)* | Warm: reuse Conan packages (`--build=missing`) and ccache |
-| `--no-cache` | Cold: empty throwaway Conan cache, all deps rebuilt from source (`--build=*`), no ccache, clean build tree (`--clean`) |
+| *(none)* | Warm: reuse Conan packages (`--build=missing`) and the compiler cache |
+| `--no-cache` | Cold: empty throwaway Conan cache, all deps rebuilt from source (`--build=*`), no compiler cache, clean build tree (`--clean`) |
 | `--no-conan-cache` | Only the Conan layer cold |
-| `--no-ccache` | Only ccache off |
+| `--no-compiler-cache` | Only the compiler cache off (alias `--no-ccache`) |
+| `--compiler-cache auto\|ccache\|sccache\|none` | Pick the compiler cache (default `auto`: ccache, else sccache, if installed) |
 | `--deps conan\|none\|auto` | Force or skip the Conan `deps` stage (default `auto`: if a conanfile exists) |
 | `--cache-dir DIR` | Cache root (default `~/.cache/buildpulse`, or `[cache] dir` in `buildpulse.toml`) |
 
@@ -118,8 +143,9 @@ buildpulse compare                                 # last two runs, stage by sta
 buildpulse compare 20261105-183909-linux-arm64 20261105-184015-linux-arm64
 ```
 
-Every run records its cache settings and the ccache hit rate in `report.json` (`meta.cache`,
-`meta.ccache_stats`) and in the summary line, so timings are never compared blind.
+Every run records its cache settings and the compiler-cache hit rate in `report.json`
+(`meta.cache`, `meta.compiler_cache_stats`) and in the summary line, so timings are never
+compared blind.
 
 ### Measured on the internal sample project
 
@@ -131,11 +157,18 @@ Every run records its cache settings and the ccache hit rate in `report.json` (`
 | aarch64 cross in Docker — total | 34.22 s | 16.68 s | 2.1× |
 | aarch64 cross, GitHub runner (`cache-benchmark` job) — `deps` | 14.64 s | 0.48 s | 30.5× |
 | aarch64 cross, GitHub runner (`cache-benchmark` job) — total | 16.59 s | 2.01 s | 8.3× |
+| Windows MSVC, GitHub runner — `deps` (GTest built from source vs. restored) ¹ | 34.66 s | 0.66 s | 52.5× |
+| Windows MSVC, GitHub runner — total ¹ | 40.95 s | 21.02 s | 1.9× |
 
-ccache hit 3/3 compilations on the warm runs. The sample project is tiny, so the dependency layer
+¹ First CI run with empty caches vs. a re-run with the Conan and sccache caches restored
+(sccache hit 3/3). ConanCenter has no prebuilt GTest for MSVC 19.5x, so the cold run builds it.
+The warm run's total is dominated by a 13 s first-time MSVC/CMake compiler detection on a fresh
+Windows VM (in the cold run, Conan's GTest build had already paid that cost inside `deps`).
+
+The compiler cache hit 3/3 compilations on all warm runs. The sample project is tiny, so the dependency layer
 dominates; on a real code base the ccache share grows with the number of translation units.
 In Docker on a Mac every stage pays ~0.5–3 s of `docker run` start-up under Rosetta, which is why
-small stages such as `ccache-zero` look slow there; on a Linux CI runner that overhead is far smaller.
+small stages such as `cache-zero` look slow there; on a Linux CI runner that overhead is far smaller.
 With the Docker layer, Conan and ccache caches restored, the whole `linux-arm64` CI job dropped from
 1 min 34 s to 50 s.
 A manual `cache-benchmark` job in the `cross-arm64` workflow (Actions → cross-arm64 → Run workflow)
@@ -146,10 +179,10 @@ repeats the cold/warm comparison on a GitHub runner and writes the table to the 
 | Layer | What it caches | Where | Status |
 |-------|----------------|-------|--------|
 | **Conan binary cache** | Prebuilt dependency packages (GTest here), keyed by settings: OS, arch, compiler, build type | `~/.cache/buildpulse/conan2/<env>/` (`CONAN_HOME`) | ✅ |
-| **ccache** | Object files of the project's own sources, keyed by compiler + flags + preprocessed source | `~/.cache/buildpulse/ccache/<env>/` (`CCACHE_DIR`), used via `CMAKE_<LANG>_COMPILER_LAUNCHER` | ✅ |
+| **ccache / sccache** | Object files of the project's own sources, keyed by compiler + flags + source. ccache on Linux/macOS, sccache for MSVC | `~/.cache/buildpulse/{ccache,sccache}/<env>/` (`CCACHE_DIR` / `SCCACHE_DIR`), used via `CMAKE_<LANG>_COMPILER_LAUNCHER` | ✅ |
 | **CMake incremental build** | The build tree: only changed files are rebuilt, configure results reused | `build/<preset>` or `--build-dir`; `--clean` / `--no-cache` bypass it | ✅ (CMake + Ninja) |
 | **Docker layer cache** | The cross image (toolchain, sysroot, Conan, ccache) | Local Docker; in CI `type=gha` via `docker/build-push-action` | ✅ |
-| **CI caches** | Conan and ccache directories between workflow runs | `actions/cache` in `ci.yml` and `cross-arm64.yml` | ✅ |
+| **CI caches** | Conan and ccache/sccache directories between workflow runs | `actions/cache` in `ci.yml`, `cross-arm64.yml`, `windows-msvc.yml` | ✅ |
 
 `<env>` is `host` or the Docker image name, so binaries from different toolchains never mix.
 The cross image ships Conan profiles (`toolchains/conan/linux-armv8`, `linux-x86_64`) through
@@ -161,7 +194,7 @@ toolchain file via `tools.cmake.cmaketoolchain:user_toolchain`.
 | Technique | What it adds | When to reach for it |
 |-----------|--------------|----------------------|
 | **Conan remote** (Artifactory, `conan_server`) | Share dependency binaries across machines and CI: build once, upload, everyone downloads | A team or a CI fleet; the next step after the local cache |
-| **sccache** | ccache alternative with remote backends (S3, GCS, Redis, GitHub Actions cache) and MSVC support | Shared compiler cache across CI runners; Windows/MSVC builds |
+| **sccache remote backends** | sccache is used locally (MSVC); it can also store to S3, GCS, Redis or the GitHub Actions cache | Shared compiler cache across a CI fleet |
 | **ccache remote storage** | ccache ≥ 4.4 can also use an HTTP/Redis secondary store | Same goal as sccache while staying on ccache |
 | **vcpkg binary caching** | vcpkg's equivalent of the Conan binary cache (files, NuGet, GHA) | Projects that use vcpkg instead of Conan |
 | **Precompiled headers / unity builds** | `target_precompile_headers`, `CMAKE_UNITY_BUILD`: less repeated header parsing | Header-heavy C++ (Boost, Qt); speeds up cold builds too |
@@ -180,7 +213,8 @@ Every `build` or `run` creates a new run directory:
 │   │   ├── 02-build.log
 │   │   └── 03-test.log
 │   └── report.json              commands, cwd, exit codes, timings, log paths
-└── latest -> 20261105-180129-host-debug
+├── latest -> 20261105-180129-host-debug
+└── latest.txt                   newest run id (works where symlinks don't, e.g. Windows)
 ```
 
 - **Default log dir:** `.buildpulse/runs/` under the directory you run `buildpulse` from. Inside
@@ -193,8 +227,9 @@ Every `build` or `run` creates a new run directory:
 ## Analyze a log
 
 ```bash
-buildpulse analyze-log .buildpulse/runs/latest/full.log
-buildpulse analyze-log .buildpulse/runs/latest/full.log --json
+buildpulse analyze-log latest                        # newest run's full.log
+buildpulse analyze-log 20261105-181144-linux-arm64   # a run id or run directory
+buildpulse analyze-log path/to/any.log --json
 ```
 
 Extracts GCC/Clang, MSVC and linker errors and warnings (file, line, column, code, message).
@@ -230,6 +265,6 @@ test BuildPulse itself**. For real work, always pass `-C <your project>` (or use
 | 3 | Claude skill: CI log → root cause → fix PR | ⬜ |
 | 4 | Build caching: Conan binary cache, ccache, Docker/CI caches, cold-vs-warm compare | ✅ |
 | 5 | SBOM (Syft) + Trivy / Semgrep in the pipeline | ⬜ |
-| 6 | Windows runner with MSVC | ⬜ |
+| 6 | Windows runner with MSVC (+ sccache, buildpulse tested on Windows) | ✅ |
 | 7 | Raspberry Pi device test rig running GTest | ⬜ |
 | 8 | Bamboo ↔ GitHub Actions concept mapping | ⬜ |

@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from buildpulse.cli import main
-from buildpulse.runner import Recorder
+from buildpulse.runner import Recorder, latest_run
 
 PY = sys.executable
 
@@ -45,7 +45,15 @@ def test_latest_points_at_newest_run(tmp_path):
         rec = Recorder(tmp_path, kind="run", label=label, project_dir=tmp_path, echo=False)
         rec.stage("run", [PY, "-c", "pass"], cwd=tmp_path)
         rec.finish()
-    assert (tmp_path / "latest").resolve() == rec.run_dir.resolve()
+    assert latest_run(tmp_path).resolve() == rec.run_dir.resolve()
+    assert (tmp_path / "latest.txt").read_text().strip() == rec.run_dir.name
+
+
+def test_latest_falls_back_to_marker_file(tmp_path):
+    (tmp_path / "run-1").mkdir()
+    (tmp_path / "latest.txt").write_text("run-1\n")
+    assert latest_run(tmp_path) == tmp_path / "run-1"
+    assert latest_run(tmp_path / "missing") is None
 
 
 def test_cli_run_custom_script(tmp_path, capsys):
@@ -57,7 +65,7 @@ def test_cli_run_custom_script(tmp_path, capsys):
                "--", PY, str(script)])
 
     assert rc == 0
-    report = json.loads((logs / "latest" / "report.json").read_text())
+    report = json.loads((latest_run(logs) / "report.json").read_text())
     assert report["kind"] == "run"
     assert report["stages"][0]["name"] == "my-build"
     assert "compiling foo.c" in Path(report["run_dir"], "full.log").read_text()
