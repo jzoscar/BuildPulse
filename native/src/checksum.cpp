@@ -1,6 +1,9 @@
 #include "pulse/checksum.hpp"
 
 #include <array>
+#include <cstddef>
+
+#include <xmmintrin.h>  // _mm_prefetch
 
 namespace pulse {
 namespace {
@@ -22,8 +25,13 @@ constexpr auto kTable = make_table();
 }  // namespace
 
 std::uint32_t crc32(std::string_view data) {
+    constexpr std::size_t kPrefetchDistance = 256;  // bytes ahead; one hint per cache line
     std::uint32_t crc = 0xFFFFFFFFU;
-    for (unsigned char byte : data) {
+    for (std::size_t i = 0; i < data.size(); ++i) {
+        if ((i & 63U) == 0) {
+            _mm_prefetch(data.data() + i + kPrefetchDistance, _MM_HINT_T0);
+        }
+        const auto byte = static_cast<unsigned char>(data[i]);
         crc = kTable[(crc ^ byte) & 0xFFU] ^ (crc >> 8);
     }
     return crc ^ 0xFFFFFFFFU;
