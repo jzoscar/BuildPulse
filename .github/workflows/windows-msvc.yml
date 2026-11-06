@@ -45,9 +45,12 @@ jobs:
         run: |
           Get-Item native/build/windows-msvc/pulse.exe
           native/build/windows-msvc/pulse.exe 123456789
-      - name: Triage build log on failure
+      - name: Triage on failure
         if: failure()
-        run: buildpulse analyze-log latest --log-dir build-logs
+        shell: bash
+        run: |
+          buildpulse triage latest --log-dir build-logs > build-logs/triage.md || true
+          cat build-logs/triage.md | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: always()
         with:

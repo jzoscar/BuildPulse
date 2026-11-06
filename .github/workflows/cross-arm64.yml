@@ -45,9 +45,12 @@ jobs:
         run: buildpulse build --preset linux-arm64 --docker buildpulse/cross-arm64 --log-dir build-logs
       - name: Check the binary targets aarch64
         run: file native/build/linux-arm64/pulse | tee /dev/stderr | grep -q "ARM aarch64"
-      - name: Triage build log on failure
+      - name: Triage on failure
         if: failure()
-        run: buildpulse analyze-log build-logs/latest/full.log
+        shell: bash
+        run: |
+          buildpulse triage latest --log-dir build-logs > build-logs/triage.md || true
+          cat build-logs/triage.md | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: always()
         with:

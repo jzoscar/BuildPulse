@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from buildpulse import __version__, cache, config
-from buildpulse.commands import analyze_log, build, compare, run
+from buildpulse.commands import analyze_log, build, compare, run, triage
 from buildpulse.runner import latest_run
 
 
@@ -65,6 +65,18 @@ def make_parser() -> argparse.ArgumentParser:
                             "two most recent runs")
     p_cmp.add_argument("--log-dir", type=Path, help="where run logs are (default: .buildpulse/runs)")
     p_cmp.set_defaults(func=_run_compare)
+
+    p_tri = sub.add_parser(
+        "triage", help="summarize a failed run for root-cause analysis (human or AI agent)")
+    p_tri.add_argument("run", nargs="?", default="latest",
+                       help="run id, run directory, report.json, or 'latest' (default)")
+    p_tri.add_argument("--log-dir", type=Path, help="where run logs are (default: .buildpulse/runs)")
+    p_tri.add_argument("-C", "--project-dir", type=Path,
+                       help="local checkout to resolve source files in (default: the run's "
+                            "project dir if it exists, else [project] dir in buildpulse.toml)")
+    p_tri.add_argument("--json", action="store_true", help="print JSON instead of Markdown")
+    p_tri.add_argument("--context", type=int, default=4, help="source lines around each error")
+    p_tri.set_defaults(func=_run_triage)
 
     p_log = sub.add_parser("analyze-log", help="extract compiler/linker errors from a build log")
     p_log.add_argument("logfile", help="a log file, a run directory, a run id, or 'latest'")
@@ -141,6 +153,20 @@ def _run_compare(args: argparse.Namespace) -> int:
     except FileNotFoundError as exc:
         print(f"buildpulse: {exc}", file=sys.stderr)
         return 2
+    return 0
+
+
+def _run_triage(args: argparse.Namespace) -> int:
+    cfg = config.load(Path.cwd())
+    log_dir = (args.log_dir or cfg.log_dir).resolve()
+    try:
+        report = compare.resolve_run(args.run, log_dir)
+    except FileNotFoundError as exc:
+        print(f"buildpulse: {exc}", file=sys.stderr)
+        return 2
+    project_dir = (args.project_dir or cfg.project_dir).resolve()
+    result = triage.build(report, project_dir, context=args.context)
+    print(result.to_json() if args.json else result.to_markdown())
     return 0
 
 

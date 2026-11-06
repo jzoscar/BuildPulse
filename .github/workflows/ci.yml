@@ -37,9 +37,12 @@ jobs:
           key: ccache-linux-x64-${{ github.run_id }}
           restore-keys: ccache-linux-x64-
       - run: buildpulse build --preset host-release --log-dir build-logs
-      - name: Triage build log on failure
+      - name: Triage on failure
         if: failure()
-        run: buildpulse analyze-log build-logs/latest/full.log
+        shell: bash
+        run: |
+          buildpulse triage latest --log-dir build-logs > build-logs/triage.md || true
+          cat build-logs/triage.md | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
