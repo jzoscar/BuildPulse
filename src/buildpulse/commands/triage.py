@@ -21,7 +21,7 @@ _GTEST_FAILED = re.compile(r"^\[\s+FAILED\s+\]\s+(?P<name>\S+\.\S+)")
 
 @dataclass
 class SourceContext:
-    file: str  # path relative to the project, or as found
+    file: str  # path relative to the project (or absolute), always with forward slashes
     line: int
     snippet: str  # numbered lines around `line`, the offending one marked with ">"
 
@@ -156,9 +156,9 @@ def build(report_path: Path, project_dir: Path, context: int = 4, tail: int = 60
         found = locate_source(issue.file, project_dir, build_dir)
         if found:
             try:
-                shown = str(found.relative_to(project_dir.resolve()))
+                shown = found.relative_to(project_dir.resolve()).as_posix()
             except ValueError:
-                shown = str(found)
+                shown = found.as_posix()
             sources.append(SourceContext(shown, issue.line, _snippet(found, issue.line, context)))
 
     return Triage(
