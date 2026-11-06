@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from buildpulse import __version__, cache, config
-from buildpulse.commands import analyze_log, build, compare, run, scan, triage
+from buildpulse.commands import analyze_log, build, compare, device_test, run, scan, triage
 from buildpulse.runner import latest_run
 
 
@@ -78,6 +78,21 @@ def make_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--log-dir", type=Path, help="where run logs go (default: .buildpulse/runs)")
     p_scan.add_argument("--cache-dir", type=Path, help="cache root (Conan home for the lock stage)")
     p_scan.set_defaults(func=_run_scan)
+
+    p_dev = sub.add_parser(
+        "device-test", help="flash a build onto a device borrowed from a LabForge rig pool and test it",
+        usage="buildpulse device-test --pool POOL --firmware FILE [options] [-- TEST_COMMAND ...]")
+    p_dev.add_argument("--pool", required=True, help="LabForge rig pool to borrow a device from")
+    p_dev.add_argument("--firmware", type=Path, required=True, help="build output to install on the device")
+    p_dev.add_argument("--version", help="firmware version (default: git describe of the project)")
+    p_dev.add_argument("--holder", help="who holds the device (default: the CI run URL, else user@host)")
+    p_dev.add_argument("--ttl", type=int, default=1800, help="lease length in seconds (default: 1800)")
+    p_dev.add_argument("--labforge", default="labforge", help="labforge CLI to call (default: on PATH)")
+    p_dev.add_argument("-C", "--project-dir", type=Path, help="project the build came from")
+    p_dev.add_argument("--log-dir", type=Path, help="where run logs go (default: .buildpulse/runs)")
+    p_dev.add_argument("test_cmd", nargs=argparse.REMAINDER,
+                       help="optional on-device test command after --; gets LABFORGE_DEVICE_HTTP etc.")
+    p_dev.set_defaults(func=_run_device_test)
 
     p_tri = sub.add_parser(
         "triage", help="summarize a failed run for root-cause analysis (human or AI agent)")
@@ -186,6 +201,37 @@ def _run_scan(args: argparse.Namespace) -> int:
 
     print(f"sca:    {findings(meta['sca']['findings'])}  (gate: {meta['fail_on']} and above)")
     print(f"sast:   {findings(meta['sast']['findings'])}")
+    return report.exit_code
+
+
+def _default_holder() -> str:
+    import getpass
+    import os
+    import socket
+
+    if os.environ.get("GITHUB_RUN_ID"):
+        return (f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
+                f"{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/{os.environ['GITHUB_RUN_ID']}")
+    return f"{getpass.getuser()}@{socket.gethostname()}"
+
+
+def _run_device_test(args: argparse.Namespace) -> int:
+    if not args.firmware.is_file():
+        print(f"buildpulse: firmware {args.firmware} not found", file=sys.stderr)
+        return 2
+    cfg = config.load(Path.cwd())
+    project_dir = (args.project_dir or cfg.project_dir).resolve()
+    test_cmd = args.test_cmd[1:] if args.test_cmd[:1] == ["--"] else args.test_cmd
+    report = device_test.run(
+        args.pool, args.firmware.resolve(), args.version or scan.project_version(project_dir),
+        (args.log_dir or cfg.log_dir).resolve(), holder=args.holder or _default_holder(),
+        test_cmd=test_cmd or None, project_dir=project_dir, labforge=args.labforge, ttl=args.ttl,
+    )
+    print(report.summary())
+    meta = report.meta
+    device = (meta.get("device") or {}).get("device") or "-"
+    print(f"device: {device}  firmware {meta['firmware']['version']} (sha256 {meta['firmware']['sha256'][:12]})"
+          f"  result: {meta['result']}")
     return report.exit_code
 
 

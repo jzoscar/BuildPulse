@@ -30,7 +30,7 @@ class SourceContext:
 class Triage:
     run_id: str
     ok: bool
-    category: str  # success | dependencies | configure | compile | link | test | command
+    category: str  # success | dependencies | configure | compile | link | test | infrastructure | command
     failed_stage: str | None = None
     command: list[str] = field(default_factory=list)
     exit_code: int = 0
@@ -71,8 +71,12 @@ class Triage:
         return "\n".join(out)
 
 
-def _category(stage: str, issues: list[analyze_log.Issue], failed_tests: list[str]) -> str:
+def _category(stage: str, issues: list[analyze_log.Issue], failed_tests: list[str],
+              kind: str | None = None) -> str:
     errors = [i for i in issues if i.severity == "error"]
+    if kind == "device-test":
+        # Borrowing or flashing the device failed: the lab's problem, not the build's.
+        return "infrastructure" if stage in ("checkout", "flash", "release") else "test"
     if stage in ("deps", "conan-profile"):
         return "dependencies"
     if stage == "configure":
@@ -134,6 +138,14 @@ def build(report_path: Path, project_dir: Path, context: int = 4, tail: int = 60
         "docker_image": meta.get("docker_image"),
         "deps": meta.get("deps"),
     }
+    if report.get("kind") == "device-test":
+        device = meta.get("device") or {}
+        firmware = meta.get("firmware") or {}
+        environment.update({
+            "pool": meta.get("pool"), "device": device.get("device"), "device_host": device.get("host"),
+            "firmware": firmware.get("version"), "firmware_sha256": (firmware.get("sha256") or "")[:12],
+            "lease": meta.get("lease_id"),
+        })
     failed = next((s for s in report["stages"] if s["returncode"] != 0), None)
     if failed is None:
         return Triage(run_id=report["run_id"], ok=True, category="success", environment=environment)
@@ -164,7 +176,7 @@ def build(report_path: Path, project_dir: Path, context: int = 4, tail: int = 60
     return Triage(
         run_id=report["run_id"],
         ok=False,
-        category=_category(failed["name"], issues, failed_tests),
+        category=_category(failed["name"], issues, failed_tests, report.get("kind")),
         failed_stage=failed["name"],
         command=unwrap_docker(failed["command"], meta.get("docker_image")),
         exit_code=failed["returncode"],

@@ -5,7 +5,7 @@ log** — every stage, stdout and stderr, exit codes and timings — so the log 
 
 ```
 BuildPulse/
-├── src/buildpulse/        Python CLI (build, run, compare, triage, scan, analyze-log)
+├── src/buildpulse/        Python CLI (build, run, compare, triage, scan, device-test, analyze-log)
 ├── .claude/skills/        ci-triage agent skill for Claude Code
 ├── tests/                 pytest + real-world build log fixtures
 ├── native/                internal sample C++ project, used only to test BuildPulse itself
@@ -19,7 +19,8 @@ BuildPulse/
 
 Requires Python ≥ 3.11, CMake ≥ 3.24, a C/C++ compiler (Ninja for the `native/` presets).
 Optional: Conan 2 (`pip install -e ".[conan]"`, included in `.[dev]`) and ccache or sccache for caching,
-Docker for cross-compilation, Syft + Trivy + Semgrep for `buildpulse scan`.
+Docker for cross-compilation, Syft + Trivy + Semgrep for `buildpulse scan`, the `labforge` CLI for
+`buildpulse device-test`.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -354,26 +355,63 @@ The `buildpulse.toml` in this repo points at `native/`, an **internal sample pro
 test BuildPulse itself**. For real work, always pass `-C <your project>` (or use `run`). Without a
 `buildpulse.toml` and without `-C`, the current directory is treated as the project.
 
+## Device tests on a rig (`buildpulse device-test`)
+
+QEMU proves the aarch64 binary runs; it does not prove the product works on the device.
+`buildpulse device-test` takes a build onto a device borrowed from a
+[LabForge](https://github.com/jzoscar/LabForge) rig pool and records it like any other run:
+
+| Stage | What happens | If it fails |
+|---|---|---|
+| `checkout` | `labforge rig checkout`: borrow a device; LabForge health-checks it first, power-cycles it through the BMC if needed, and quarantines one that fails twice | `infrastructure` |
+| `flash` | `labforge rig flash`: install this build (version from `git describe` + sha256) and wait until the device runs it healthy | `infrastructure` |
+| `verify` | `labforge rig check`: the device is healthy and runs exactly this build (sha256 match) | `test` (the build) |
+| `test` | your on-device tests after `--`, with `LABFORGE_DEVICE_HTTP`, `LABFORGE_DEVICE_HOST`, `LABFORGE_LEASE_ID` set | `test` |
+| `release` | `labforge rig release`: always runs; the device is power-cycled back to a known state | `infrastructure` |
+
+The result sent back to LabForge and the `buildpulse triage` category keep the two kinds of failure
+apart: a rig problem is `infra-failed` / `infrastructure` and counts against the device, never against
+the code. `report.json` and the triage environment carry the pool, device, lease, firmware version
+and sha256. LabForge keeps the device and BMC credentials; the job only needs `LABFORGE_SERVER` and
+`LABFORGE_API_TOKEN`.
+
+```bash
+# with LabForge's simulated lab (labforge sim run + labforge serve) or a real lab's LabForge
+buildpulse device-test --pool sim-sensor --firmware native/build/linux-arm64/pulse \
+  -- sh -c 'curl -sf "$LABFORGE_DEVICE_HTTP/health"'
+```
+
+```
+run: 20261105-223024-device-sim-sensor  (device-test, .../native)
+  checkout         2.30s  ok
+  flash            3.55s  ok
+  verify           1.98s  ok
+  test             0.44s  ok
+  release          1.61s  ok
+  total            9.88s  ok
+device: sim-sensor-01  firmware 30acdbb-dirty (sha256 abdcd5809a9c)  result: passed
+```
+
+In CI, the `device-test` job in `cross-arm64` downloads the aarch64 build, starts LabForge's simulated
+rig on the runner and runs the same command. LabForge is a private repository: the job runs when the
+`LABFORGE_TOKEN` secret is set (a read-only token for it) and otherwise is skipped with a notice.
+
 ## Next steps (designed, not built yet)
 
-### Device test rigs: tests on real Gocators, not just QEMU
+### Device test rigs on real Gocators
 
-QEMU proves the aarch64 binary runs; it does not prove the product works on the sensor.
-The plan for a rig behind CI:
+The flow above runs today against simulated devices. On real hardware:
 
 - **Runner:** a self-hosted runner (or Bamboo remote agent) on a small Linux box in the lab, labelled
   by the hardware it can reach (`[self-hosted, linux, rig-gocator-2500]`). Jobs that need hardware
   ask for the label; everything else stays on cloud runners. A Raspberry Pi (bookworm, same glibc as
   our sysroot) is a cheap stand-in for developing the flow.
-- **Flow:** `cross-arm64` publishes the build artifact → the rig job downloads it, **checks out a
-  device** (lock), flashes or deploys, waits for health (boot, version endpoint), runs the on-device
-  GTest binary and pytest/Jest end-to-end suites over the network, collects device logs, and
-  **always** releases the device and restores a known-good image.
-- **Results** go through buildpulse like any run: stage logs, `report.json`, and a triage bundle on
-  failure, with the device id and firmware version in the environment.
-- **Telling device faults from code faults:** health check before the test (fail as `infrastructure`,
-  not `test`), a known-good build as control, retries only for infrastructure failures, and
-  quarantining a device that fails its health check twice. Flaky tests are tracked, not retried away.
+- **Flashing:** LabForge's `flash` step calls the device's own update mechanism instead of the
+  simulator's firmware endpoint, and restores a known-good image on release (today: a power cycle).
+- **Tests:** the on-device GTest binary plus pytest/Jest end-to-end suites over the network, with
+  device logs collected into the run directory.
+- **Telling device faults from code faults** beyond the health check: a known-good build as control,
+  retries only for infrastructure failures; flaky tests are tracked, not retried away.
 - **Capacity:** a pool of devices per product family, a queue with timeouts, and a dashboard of rig
   utilisation and failure causes.
 
@@ -414,5 +452,5 @@ hardware-rig plans on Bamboo agents until the rig runners are ported.
 | 4 | Build caching: Conan binary cache, ccache, Docker/CI caches, cold-vs-warm compare | ✅ |
 | 5 | Supply chain: SBOM (Syft), SCA (Trivy), SAST (Semgrep + CodeQL), weekly re-scan | ✅ |
 | 6 | Windows runner with MSVC (+ sccache, buildpulse tested on Windows) | ✅ |
-| 7 | Device test rigs | 📝 designed, see Next steps |
+| 7 | Device test rigs: `buildpulse device-test` on a LabForge rig pool | ✅ on simulated devices; real hardware in Next steps |
 | 8 | Bamboo ↔ Bitbucket Pipelines ↔ GitHub Actions mapping and migration | 📝 designed, see Next steps |

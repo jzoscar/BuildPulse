@@ -62,6 +62,72 @@ jobs:
             native/build/linux-arm64/pulse
             native/build/linux-arm64/pulse_tests
 
+  # Flash the aarch64 build onto a device borrowed from a LabForge rig pool and test it there.
+  # Here the rig is LabForge's simulated lab running on the runner; on real hardware the same
+  # `buildpulse device-test` runs on a self-hosted runner in the lab, against the lab's LabForge.
+  device-test:
+    needs: linux-arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Get LabForge
+        id: labforge
+        env:
+          LABFORGE_TOKEN: ${{ secrets.LABFORGE_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        shell: bash
+        run: |
+          repo="github.com/jzoscar/LabForge.git"
+          url="https://${LABFORGE_TOKEN:+x-access-token:${LABFORGE_TOKEN}@}${repo}"
+          if git clone --depth 1 --quiet "$url" "$RUNNER_TEMP/labforge"; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            msg="Device test skipped: LabForge is not reachable (private repository and no LABFORGE_TOKEN secret)."
+            echo "::notice::$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.labforge.outputs.available == 'true'
+        run: pip install -e . "$RUNNER_TEMP/labforge"
+      - if: steps.labforge.outputs.available == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: linux-arm64-build
+      - name: Start the simulated rig and LabForge
+        if: steps.labforge.outputs.available == 'true'
+        shell: bash
+        env:
+          LABFORGE_SECRET_SIM_BMC: admin:admin
+          LABFORGE_IAC_PATH: ${{ runner.temp }}/labforge/infra
+        run: |
+          mkdir -p device-logs
+          labforge sim run > device-logs/sim.log 2>&1 &
+          labforge serve > device-logs/labforge.log 2>&1 &
+          for _ in $(seq 30); do curl -sf http://127.0.0.1:8000/api/v1/health && break; sleep 1; done
+          labforge apply "$LABFORGE_IAC_PATH/test/sim-lab.yaml" -y
+          labforge rig list
+      - name: Flash and test on the device
+        if: steps.labforge.outputs.available == 'true'
+        run: >-
+          buildpulse device-test --pool sim-sensor --firmware native/build/linux-arm64/pulse
+          --log-dir device-logs -- sh -c 'curl -sf "$LABFORGE_DEVICE_HTTP/health"'
+      - name: Triage on failure
+        if: failure() && steps.labforge.outputs.available == 'true'
+        shell: bash
+        run: |
+          buildpulse triage latest --log-dir device-logs > device-logs/triage.md || true
+          cat device-logs/triage.md | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.labforge.outputs.available == 'true'
+        with:
+          name: device-test
+          path: |
+            device-logs/
+            !device-logs/latest
+
   # Manual (Actions > cross-arm64 > Run workflow): cold vs warm on the same runner, to measure what the caches buy.
   cache-benchmark:
     if: github.event_name == 'workflow_dispatch'
